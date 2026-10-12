@@ -203,6 +203,7 @@
   /* Sharing */
   .sheet-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .after-row.single { grid-template-columns: 1fr; }
+  .friends-btn { margin-top: 6px; }
   .share-btn {
     display: inline-flex; align-items: center; gap: 6px; flex: none;
     min-height: 40px; padding: 0 14px; border-radius: 999px; border: 0;
@@ -248,8 +249,8 @@
 
   <!-- Shown when someone opens a shared result link -->
   <section class="hero" id="sharedIntro" hidden>
-    <h1>The wheel has spoken</h1>
-    <p>A friend spun Forkspin. Here's where it landed.</p>
+    <h1 id="sharedTitle">The wheel has spoken</h1>
+    <p id="sharedText">A friend spun Forkspin. Here's where it landed.</p>
   </section>
 
   <div class="seg" id="modeSeg" role="group" aria-label="Wheel mode" hidden>
@@ -287,6 +288,11 @@
       <button class="link-btn" id="reshuffleBtn" hidden>Reshuffle</button>
     </div>
     <div class="loadbar" id="loadbar" hidden aria-hidden="true"></div>
+
+    <button class="btn friends-btn" id="friendsBtn">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><circle cx="17" cy="9" r="2.6"/><path d="M15.5 14.7c3 .2 5.5 2.1 5.5 5.3"/></svg>
+      Spin with friends
+    </button>
 
     <div class="card" id="filters" hidden>
       <h2>How far will you go?</h2>
@@ -826,7 +832,7 @@
     // A shared result has no wheel of your own yet: offer to start one instead.
     $('#againBtn').textContent = state.shared ? 'Spin your own wheel' : 'Spin again';
     $('#removeBtn').hidden = !!state.shared;
-    $('#hideBtn').hidden = !!state.shared;
+    $('#hideBtn').hidden = !!(state.shared || state.group);
     $('.after-row').classList.toggle('single', !!state.shared);
 
     const hrs = $('#rHours'); hrs.replaceChildren();
@@ -981,6 +987,76 @@
       state.wheel = [{ name: shared.place.name }, { name: shared.place.name }];
       drawWheel(); show();
     }
+  }
+
+  /* ---------- Spin with friends: share the wheel itself ---------- */
+  // Each place is packed small: [name, lat, lon, food types, address, phone, menu, website, hours].
+  function packPlace(p) {
+    const menu = clip(p.menu, 150);
+    return [clip(p.name, 60), +p.lat.toFixed(5), +p.lon.toFixed(5), p.cuisines.slice(0, 2).map(c => clip(c, 20)),
+      clip(p.address, 70), clip(p.phone, 24), menu, menu ? '' : clip(p.website, 150), clip(p.hours, 120)];
+  }
+  function unpackPlace(a, i) {
+    if (!Array.isArray(a)) return null;
+    const str = (x, n) => (typeof x === 'string' ? x.slice(0, n) : '');
+    const name = str(a[0], 60), lat = Number(a[1]), lon = Number(a[2]);
+    if (!name || !isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+    const hours = str(a[8], 120);
+    return {
+      id: 'group' + i, name, lat, lon, dist: null,
+      cuisines: Array.isArray(a[3]) ? a[3].map(c => str(c, 20)).filter(Boolean).slice(0, 2) : [],
+      address: str(a[4], 70), phone: str(a[5], 24), menu: str(a[6], 150), website: str(a[7], 150),
+      hours, hoursParsed: parseHours(hours), keys: []
+    };
+  }
+  function wheelLink() {
+    return location.origin + location.pathname + '#w=' + toB64Url({ v: 1, p: state.wheel.map(packPlace) });
+  }
+  function readWheel(hash) {
+    if (!hash.startsWith('#w=')) return null;
+    try {
+      const d = fromB64Url(hash.slice(3));
+      if (!d || !Array.isArray(d.p)) return null;
+      const places = d.p.slice(0, MAX_ON_WHEEL).map(unpackPlace).filter(Boolean);
+      return places.length >= 2 ? places : null;
+    } catch (e) { return null; }
+  }
+  async function shareWheel() {
+    if (state.wheel.length < 2 || !state.loc || !state.wheel.every(p => typeof p.lat === 'number')) {
+      toast(state.busy ? 'Still finding restaurants. Try again in a moment.' : 'The wheel needs at least two places first.');
+      return;
+    }
+    const url = wheelLink();
+    const text = "Help me pick where we're eating! Spin my Forkspin wheel 🎡";
+    if (navigator.share) {
+      try { await navigator.share({ title: 'Forkspin', text, url }); return; }
+      catch (e) { if (e && e.name === 'AbortError') return; }
+    }
+    try {
+      await navigator.clipboard.writeText(`${text} ${url}`);
+      toast('Wheel link copied. Paste it in your group chat.');
+    } catch (e) {
+      window.prompt('Copy this link to share your wheel:', url);
+    }
+  }
+  // A friend opened a shared wheel: they get the same places and can spin it themselves.
+  function openGroupWheel(places) {
+    state.group = true;
+    state.loc = { lat: places[0].lat, lon: places[0].lon, label: 'Shared wheel' };
+    state.wheel = places;
+    $('#sharedTitle').textContent = 'Help pick where to eat';
+    $('#sharedText').textContent = "A friend shared their wheel. Spin it, then share where it lands.";
+    $('#hero').hidden = true;
+    $('#sharedIntro').hidden = false;
+    $('#setup').hidden = true;
+    $('#play').hidden = true;
+    $('#modeSeg').hidden = true;
+    $('#locBtn').hidden = true;
+    $('#seePickBtn').hidden = true;
+    $('#sharedActions').hidden = false;
+    $('#hideBtn').hidden = true;
+    state.rot = 0; drawWheel();
+    $('#spinBtn').disabled = false;
   }
 
   /* ---------- UI wiring ---------- */
@@ -1216,11 +1292,19 @@
     closeSheet(true); setTimeout(spin, 150);
   });
   $('#shareBtn').addEventListener('click', shareResult);
+  $('#friendsBtn').addEventListener('click', shareWheel);
   $('#seePickBtn').addEventListener('click', () => { if (state.shared) showResult(state.shared.place); });
   $('#ownWheelBtn').addEventListener('click', e => { e.preventDefault(); location.href = location.pathname; });
   // Opening another shared link while the app is already open.
-  window.addEventListener('hashchange', () => { if (location.hash.startsWith('#r=')) location.reload(); });
+  window.addEventListener('hashchange', () => { if (/^#[rw]=/.test(location.hash)) location.reload(); });
   $('#removeBtn').addEventListener('click', () => {
+    if (state.group) {
+      // On a friend's shared wheel, just drop this slice.
+      if (state.wheel.length > 2) state.wheel = state.wheel.filter(p => p !== state.current);
+      else toast('A wheel needs at least two places.');
+      closeSheet(true); drawWheel();
+      return;
+    }
     // Removes the whole restaurant or chain, so another location doesn't take its place.
     if (state.current) state.current.keys.forEach(k => state.excluded.add(k));
     closeSheet(true);
@@ -1256,7 +1340,9 @@
   renderDistChips();
   const sharedResult = readShared(location.hash);
   const saved = store.get('loc');
+  const sharedWheel = readWheel(location.hash);
   if (sharedResult) openShared(sharedResult);
+  else if (sharedWheel) openGroupWheel(sharedWheel);
   else if (saved && typeof saved.lat === 'number' && typeof saved.lon === 'number') startAt(saved);
 })();
 </script>
