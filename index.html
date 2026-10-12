@@ -91,6 +91,17 @@
     background: var(--chip); border: 0; font-weight: 500; font-size: 14px;
   }
   .loc-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .top-right { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 62%; }
+  .top-right .loc-btn { max-width: none; min-width: 0; }
+  .icon-btn {
+    flex: none; width: 40px; height: 40px; border-radius: 50%; border: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--chip); color: var(--ink);
+  }
+  .icon-btn .snd-off { display: none; }
+  .icon-btn[aria-pressed="false"] { color: var(--muted); }
+  .icon-btn[aria-pressed="false"] .snd-on { display: none; }
+  .icon-btn[aria-pressed="false"] .snd-off { display: block; }
 
   /* Hero copy */
   .hero { margin: 18px 0 6px; }
@@ -259,10 +270,16 @@
 <div class="app">
   <header class="top">
     <div class="brand">Forkspin</div>
-    <button id="locBtn" class="loc-btn" hidden aria-label="Change location">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>
-      <span id="locLabel"></span>
-    </button>
+    <div class="top-right">
+      <button id="soundBtn" class="icon-btn" aria-pressed="true" aria-label="Wheel sound on" title="Wheel sound">
+        <svg class="snd-on" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor" stroke-linejoin="round"/><path d="M15.5 9a4.2 4.2 0 0 1 0 6"/><path d="M18.3 6.5a8 8 0 0 1 0 11"/></svg>
+        <svg class="snd-off" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor" stroke-linejoin="round"/><path d="M16 9.5l5 5"/><path d="M21 9.5l-5 5"/></svg>
+      </button>
+      <button id="locBtn" class="loc-btn" hidden aria-label="Change location">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>
+        <span id="locLabel"></span>
+      </button>
+    </div>
   </header>
 
   <section class="hero" id="hero">
@@ -818,9 +835,57 @@
   }
 
   /* ---------- Spinning ---------- */
+  /* ---------- Wheel clicker sound ---------- */
+  // Made in code with the Web Audio API, so there's no sound file to download.
+  let soundOn = store.get('sound') !== false;      // on unless the person turned it off
+  let audioCtx = null, lastTick = -1;
+  function audio() {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      try { audioCtx = new AC(); } catch (e) { return null; }
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    return audioCtx;
+  }
+  // One short "tick", like the flapper hitting a peg.
+  function tick() {
+    if (!soundOn) return;
+    const ac = audio();
+    if (!ac || ac.state !== 'running') return;
+    const now = ac.currentTime;
+    if (now - lastTick < 0.028) return;              // very fast spins: don't stack clicks
+    lastTick = now;
+    const osc = ac.createOscillator(), gain = ac.createGain(), hp = ac.createBiquadFilter();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(1900, now);
+    osc.frequency.exponentialRampToValueAtTime(700, now + 0.03);
+    hp.type = 'highpass'; hp.frequency.value = 500;
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.22, now + 0.002);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.045);
+    osc.connect(hp).connect(gain).connect(ac.destination);
+    osc.start(now); osc.stop(now + 0.05);
+  }
+  function setSound(on) {
+    soundOn = on;
+    store.set('sound', on);
+    const b = $('#soundBtn');
+    b.setAttribute('aria-pressed', String(on));
+    b.setAttribute('aria-label', on ? 'Wheel sound on' : 'Wheel sound off');
+    if (on) {                                        // a click confirms it's on
+      const ac = audio();
+      if (ac) ac.resume().then(tick).catch(() => {});
+    }
+  }
+
   // Turns the wheel so slice `t` stops under the pointer, `f` of the way across it.
   function animateTo(t, f, turns, dur, done) {
     const seg = TAU / state.wheel.length;
+    // Which slice is under the pointer (at the top) for a given rotation.
+    const underPointer = rot => Math.floor((((1.5 * Math.PI - rot) % TAU) + TAU) % TAU / seg);
+    let lastSlice = underPointer(state.rot);
+    audio();                                         // wake the sound up on the tap that started the spin
     const target = 1.5 * Math.PI - (t + f) * seg;     // pointer is at the top of the wheel
     const delta = (((target - state.rot) % TAU) + TAU) % TAU + TAU * turns;
     const start = state.rot;
@@ -828,6 +893,8 @@
     const frame = now => {
       const p = Math.min(1, (now - t0) / dur);
       state.rot = start + delta * (1 - Math.pow(1 - p, 4));
+      const slice = underPointer(state.rot);
+      if (slice !== lastSlice) { lastSlice = slice; tick(); }
       drawWheel();
       if (p < 1) { requestAnimationFrame(frame); return; }
       state.rot = ((state.rot % TAU) + TAU) % TAU;
@@ -1496,6 +1563,9 @@
   });
   $('#shareBtn').addEventListener('click', shareResult);
   $('#friendsBtn').addEventListener('click', shareWheel);
+  $('#soundBtn').addEventListener('click', () => setSound(!soundOn));
+  $('#soundBtn').setAttribute('aria-pressed', String(soundOn));
+  $('#soundBtn').setAttribute('aria-label', soundOn ? 'Wheel sound on' : 'Wheel sound off');
   $('#seePickBtn').addEventListener('click', () => { if (state.shared) showResult(state.shared.place); });
   $('#ownWheelBtn').addEventListener('click', e => { e.preventDefault(); location.href = location.pathname; });
   // Opening another shared link while the app is already open.
