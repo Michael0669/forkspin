@@ -231,6 +231,8 @@
   .loader .loader-slow { margin-top: 12px; font-size: 14px; }
   .loader .link-btn { margin-top: 18px; }
   @media (prefers-reduced-motion: reduce) { .loader-wheel { animation-duration: 6s; } }
+  .listing-note { margin: 10px 0 0; font-size: 13px; line-height: 1.45; color: var(--muted); }
+  .listing-note .stale { color: var(--accent); font-weight: 500; }
   .credit { text-align: center; margin: 4px 0 0; font-size: 12px; color: var(--muted); }
   .credit a { color: inherit; }
 
@@ -361,7 +363,7 @@
     <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.2C.9 8.4 3 4.5 6.7 4.5c2.1 0 3.6 1.2 4.3 2.6h2c.7-1.4 2.2-2.6 4.3-2.6 3.7 0 5.8 3.9 4.3 7.3C19.5 16.4 12 21 12 21z"/></svg>
     Enjoying Forkspin? Leave a tip
   </button>
-  <p class="credit">Restaurant data © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors</p>
+  <p class="credit">Restaurant data © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors.<br>Listings are kept up by volunteers, so some places may have closed.</p>
 </div>
 
 <!-- Loading screen: stays up until the restaurants within 10 miles have arrived -->
@@ -397,6 +399,7 @@
   <div class="meta" id="rMeta"></div>
   <div class="hours" id="rHours"></div>
   <details class="week" id="rWeek" hidden><summary>See all hours</summary><div id="rWeekText"></div></details>
+  <p class="listing-note" id="rNote"></p>
   <div class="actions" id="rActions"></div>
   <div class="after-row">
     <button class="btn" id="againBtn">Spin again</button>
@@ -588,6 +591,15 @@
     }
     return false;
   }
+  // When the map listing was last edited or confirmed by a volunteer, as "YYYY-MM".
+  function lastUpdated(el, t) {
+    const dates = [el.timestamp, t.check_date, t['survey:date'], t['check_date:opening_hours']]
+      .map(d => (typeof d === 'string' ? d.match(/^(\d{4})(?:-(\d{2}))?/) : null))
+      .filter(Boolean)
+      .map(m => `${m[1]}-${m[2] || '01'}`)
+      .filter(d => d >= '2004-01' && d <= new Date().toISOString().slice(0, 7));
+    return dates.sort().pop() || '';
+  }
   function normalize(el, lat, lon) {
     const t = el.tags || {};
     const plat = el.lat ?? (el.center && el.center.lat);
@@ -612,7 +624,8 @@
       compact: compactName(t.name),
       address: [street, t['addr:city']].filter(Boolean).join(', '),
       hours,
-      hoursParsed: parseHours(hours)
+      hoursParsed: parseHours(hours),
+      updated: lastUpdated(el, t)
     };
     p.chainName = chainFromName(p.compact) || (t.brand ? compactName(t.brand) : '');
     p.keys = keysFor(p);
@@ -628,7 +641,7 @@
   });
   async function fetchPlaces(lat, lon, miles, signal) {
     const r = Math.round(miles * 1609.34);
-    const q = `[out:json][timeout:25];(node["amenity"~"^(restaurant|fast_food)$"]["name"](around:${r},${lat},${lon});way["amenity"~"^(restaurant|fast_food)$"]["name"](around:${r},${lat},${lon}););out center tags ${RESULT_CAP};`;
+    const q = `[out:json][timeout:25];(node["amenity"~"^(restaurant|fast_food)$"]["name"](around:${r},${lat},${lon});way["amenity"~"^(restaurant|fast_food)$"]["name"](around:${r},${lat},${lon}););out meta center ${RESULT_CAP};`;
     const body = 'data=' + encodeURIComponent(q);
     const ctls = OVERPASS.map(() => new AbortController());
     const onAbort = () => ctls.forEach(c => c.abort());
@@ -971,6 +984,21 @@
     const week = $('#rWeek');
     if (p.hours && p.hoursParsed) { week.hidden = false; $('#rWeekText').textContent = p.hours.split(';').map(s => s.trim()).filter(Boolean).join('  •  '); }
     else week.hidden = true;
+
+    // Listings come from volunteers, so say how fresh this one is.
+    const note = $('#rNote'); note.replaceChildren();
+    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    if (p.updated && /^\d{4}-\d{2}$/.test(p.updated)) {
+      const [y, m] = p.updated.split('-').map(Number);
+      const ageYears = (Date.now() - new Date(y, m - 1, 1).getTime()) / (365.25 * 86400000);
+      const when = document.createElement('span');
+      when.textContent = `Map listing last updated ${MONTHS[m - 1] || ''} ${y}. `;
+      if (ageYears >= 3) when.className = 'stale';
+      note.appendChild(when);
+    }
+    note.appendChild(document.createTextNode(note.childNodes.length
+      ? 'Some places may have closed since. Call ahead if you’re not sure.'
+      : 'Listings are kept up by volunteers, so some places may have closed. Call ahead if you’re not sure.'));
 
     const acts = $('#rActions'); acts.replaceChildren();
     acts.appendChild(actionLink('Get directions', directionsUrl(p), true));
@@ -1405,13 +1433,13 @@
   /* ---------- Saved results (this device only) ---------- */
   // Reopening the app near the same spot within a day skips the slow map search.
   // If the map server is down, a saved list up to 30 days old is used instead.
-  const CACHE_KEY = 'places-v2', CACHE_HOURS = 24, CACHE_NEAR_MI = 0.5, STALE_HOURS = 24 * 30, STALE_NEAR_MI = 3;
+  const CACHE_KEY = 'places-v3', CACHE_HOURS = 24, CACHE_NEAR_MI = 0.5, STALE_HOURS = 24 * 30, STALE_NEAR_MI = 3;
   function writeCache(loc, places, radius) {
     const slim = places.map(p => ({
       id: p.id, name: p.name, lat: p.lat, lon: p.lon, cuisines: p.cuisines, phone: p.phone, website: p.website,
-      menu: p.menu, brand: p.brand, compact: p.compact, chainName: p.chainName, address: p.address, hours: p.hours
+      menu: p.menu, brand: p.brand, compact: p.compact, chainName: p.chainName, address: p.address, hours: p.hours, updated: p.updated
     }));
-    try { localStorage.removeItem('places-v1'); } catch (e) { /* old format */ }
+    try { localStorage.removeItem('places-v1'); localStorage.removeItem('places-v2'); } catch (e) { /* old formats */ }
     store.set(CACHE_KEY, { lat: loc.lat, lon: loc.lon, time: Date.now(), radius, places: slim });
   }
   function readCache(loc, maxHours, nearMi) {
