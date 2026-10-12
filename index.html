@@ -111,6 +111,10 @@
 
   .pool-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px; }
   .pool-row p { margin: 0; color: var(--muted); font-size: 14px; }
+  .loadbar { height: 3px; border-radius: 3px; background: var(--chip); overflow: hidden; position: relative; margin: 0 0 6px; }
+  .loadbar::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 35%; background: var(--accent); border-radius: 3px; animation: slide 1.1s ease-in-out infinite; }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+  @media (prefers-reduced-motion: reduce) { .loadbar::after { animation: none; width: 100%; opacity: .45; } }
   .link-btn { background: none; border: 0; padding: 8px 4px; min-height: 44px; font-weight: 700; color: var(--accent); font-size: 14px; }
 
   /* Cards, chips, buttons */
@@ -119,6 +123,8 @@
   .card h2:not(:first-child) { margin-top: 18px; }
   .chips { display: flex; flex-wrap: wrap; gap: 8px; }
   .chip { min-height: 40px; padding: 0 14px; border-radius: 999px; border: 1.5px solid var(--line); background: transparent; font-weight: 500; font-size: 14px; }
+  #distChips { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+  #distChips .chip { padding: 0 2px; white-space: nowrap; }
   .chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
   .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; min-height: 44px; }
   .switch-row small { display: block; color: var(--muted); font-size: 13px; }
@@ -169,8 +175,9 @@
   .actions { display: grid; gap: 10px; margin-top: 16px; }
   .actions .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .actions .row.single { grid-template-columns: 1fr; }
-  .sheet .again { margin-top: 10px; }
-  .sheet .remove { display: block; margin: 6px auto 0; color: var(--muted); font-weight: 500; }
+  .after-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .after-row .btn { min-height: 48px; padding: 0 10px; font-size: 15px; background: var(--chip); border-color: var(--chip); }
+  .sheet .hide-link { display: block; margin: 6px auto 0; color: var(--muted); font-weight: 500; }
 
   /* Ad slot: fixed banner at the very bottom, never over the wheel or the result */
   .ad {
@@ -223,22 +230,29 @@
       <button class="btn" id="placeBtn">Go</button>
     </div>
     <p class="msg" id="setupMsg" role="status"></p>
-    <button class="link-btn" id="demoBtn" hidden>Try it with sample places</button>
   </section>
 
   <!-- Play: shown once restaurants are loaded -->
   <section id="play" hidden>
     <div class="pool-row">
       <p id="poolInfo" role="status" aria-live="polite"></p>
+      <button class="link-btn" id="retryBtn" hidden>Try again</button>
       <button class="link-btn" id="reshuffleBtn" hidden>Reshuffle</button>
     </div>
-    <p class="demo-note" id="demoNote" hidden>Sample places for preview. Real restaurants load when the app can reach the internet.</p>
+    <div class="loadbar" id="loadbar" hidden aria-hidden="true"></div>
 
     <div class="card" id="filters" hidden>
       <h2>How far will you go?</h2>
       <div class="chips" id="distChips" role="group" aria-label="Distance"></div>
       <h2>What are you craving?</h2>
       <div class="chips" id="cuisineChips" role="group" aria-label="Food type"></div>
+      <div class="switch-row">
+        <div>
+          Local restaurants only
+          <small>No chains or franchises.</small>
+        </div>
+        <button class="switch" id="localSwitch" role="switch" aria-checked="false" aria-label="Local restaurants only"></button>
+      </div>
       <div class="switch-row">
         <div>
           Open now
@@ -259,8 +273,11 @@
   <div class="hours" id="rHours"></div>
   <details class="week" id="rWeek" hidden><summary>See all hours</summary><div id="rWeekText"></div></details>
   <div class="actions" id="rActions"></div>
-  <button class="btn again" id="againBtn">Spin again</button>
-  <button class="link-btn remove" id="removeBtn">Take this off the wheel</button>
+  <div class="after-row">
+    <button class="btn" id="againBtn">Spin again</button>
+    <button class="btn" id="removeBtn">Take off the wheel</button>
+  </div>
+  <button class="link-btn hide-link" id="hideBtn">Closed or not here? Hide it for good</button>
 </div>
 
 <!-- Ad slot -->
@@ -278,6 +295,8 @@
   const TAU = Math.PI * 2;
   const MAX_ON_WHEEL = 10;
   const DEFAULT_RADIUS_MI = 3;
+  const MAX_RADIUS_MI = 10;     // everything up to this distance loads once, up front
+  const RESULT_CAP = 1000;
   const PALETTE = ['#D63B22', '#F2B33D', '#2E9A6B', '#3568A8', '#8B4A9C', '#EE8446'];
   const PALETTE_TEXT = ['#FFFFFF', '#14304A', '#FFFFFF', '#FFFFFF', '#FFFFFF', '#14304A'];
   const SETUP_WHEEL = ['Tacos', 'Pizza', 'Sushi', 'Burgers', 'Thai', 'BBQ', 'Pho', 'Curry'].map(name => ({ name }));
@@ -288,6 +307,8 @@
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage unavailable */ } }
   };
 
+  const hidden = new Set(Array.isArray(store.get('hidden')) ? store.get('hidden') : []);
+
   const state = {
     loc: null,            // { lat, lon, label }
     all: [],              // every place fetched
@@ -297,12 +318,18 @@
     radius: DEFAULT_RADIUS_MI,
     cuisines: new Set(),
     openNow: false,
-    excluded: new Set(),
+    excluded: new Set(),  // keys of restaurants/chains taken off the wheel this session
+    localOnly: false,
     wheel: SETUP_WHEEL,
     rot: 0,
     spinning: false,
     current: null,
-    busy: false
+    busy: false,
+    loadCtl: null,        // AbortController for the request in flight
+    loadNeed: 0,          // miles being loaded right now
+    loadError: '',        // message shown if the last extra load failed
+    failedNeed: 0,        // miles that failed to load (used by "Try again")
+    pendingRefresh: false // new data arrived mid-spin; apply after the spin
   };
 
   /* ---------- Cuisine names ---------- */
@@ -401,26 +428,41 @@
     const a = Math.sin(dLat / 2) ** 2 + Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(dLon / 2) ** 2;
     return 2 * R * Math.asin(Math.sqrt(a));
   };
-  async function postWithTimeout(url, body, ms) {
+  async function postWithTimeout(url, body, ms, ext) {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), ms);
+    const stop = () => ctl.abort();
+    if (ext) ext.addEventListener('abort', stop);
     try {
       const res = await fetch(url, { method: 'POST', body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, signal: ctl.signal });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return await res.json();
-    } finally { clearTimeout(t); }
+    } finally { clearTimeout(t); if (ext) ext.removeEventListener('abort', stop); }
+  }
+  // Skip places OpenStreetMap marks as closed, ended, or vacant.
+  function looksClosed(t) {
+    if (/^\s*(closed|off)\s*$/i.test(t.opening_hours || '')) return true;
+    if (/\b(permanently\s+)?closed\b|\bout of business\b/i.test(t.name || '')) return true;
+    if (Object.keys(t).some(k => /^(disused|abandoned|was|demolished|removed|razed):/.test(k))) return true;
+    if (t.shop === 'vacant') return true;
+    if (t.end_date) {
+      const d = Date.parse(/^\d{4}$/.test(t.end_date) ? t.end_date + '-12-31' : t.end_date);
+      if (!isNaN(d) && d < Date.now()) return true;
+    }
+    return false;
   }
   function normalize(el, lat, lon) {
     const t = el.tags || {};
     const plat = el.lat ?? (el.center && el.center.lat);
     const plon = el.lon ?? (el.center && el.center.lon);
     if (plat == null || plon == null || !t.name) return null;
+    if (looksClosed(t)) return null;
     let cuisines = (t.cuisine || '').split(';').map(s => s.trim()).filter(Boolean).slice(0, 3).map(prettyCuisine);
     if (t.amenity === 'fast_food' && !cuisines.includes('Fast food')) cuisines.push('Fast food');
     if (!cuisines.length) cuisines = ['Other'];
     const street = [t['addr:housenumber'], t['addr:street']].filter(Boolean).join(' ');
     const hours = t.opening_hours || '';
-    return {
+    const p = {
       id: el.type + el.id,
       name: t.name,
       lat: plat, lon: plon,
@@ -429,23 +471,37 @@
       phone: t.phone || t['contact:phone'] || '',
       website: t.website || t['contact:website'] || '',
       menu: t['menu:url'] || t['website:menu'] || '',
+      brand: t['brand:wikidata'] || t.brand || '',
+      compact: compactName(t.name),
       address: [street, t['addr:city']].filter(Boolean).join(', '),
       hours,
       hoursParsed: parseHours(hours)
     };
+    p.chainName = chainFromName(p.compact) || (t.brand ? compactName(t.brand) : '');
+    p.keys = keysFor(p);
+    return p;
   }
-  async function fetchPlaces(lat, lon, miles) {
+  // Asks both free servers at the same time and uses whichever answers first.
+  // Gives up after 15 seconds, or right away if `signal` is aborted.
+  async function fetchPlaces(lat, lon, miles, signal) {
     const r = Math.round(miles * 1609.34);
-    const q = `[out:json][timeout:25];(node["amenity"~"^(restaurant|fast_food)$"]["name"](around:${r},${lat},${lon});way["amenity"~"^(restaurant|fast_food)$"]["name"](around:${r},${lat},${lon}););out center tags 400;`;
-    let lastErr;
-    for (const url of OVERPASS) {
-      try {
-        const data = await postWithTimeout(url, 'data=' + encodeURIComponent(q), 25000);
-        const seen = new Set();
-        return data.elements.map(el => normalize(el, lat, lon)).filter(p => p && !seen.has(p.id) && seen.add(p.id)).sort((a, b) => a.dist - b.dist);
-      } catch (e) { lastErr = e; }
+    const q = `[out:json][timeout:20];(node["amenity"~"^(restaurant|fast_food)$"]["name"](around:${r},${lat},${lon});way["amenity"~"^(restaurant|fast_food)$"]["name"](around:${r},${lat},${lon}););out center tags ${RESULT_CAP};`;
+    const body = 'data=' + encodeURIComponent(q);
+    const ctls = OVERPASS.map(() => new AbortController());
+    const onAbort = () => ctls.forEach(c => c.abort());
+    if (signal) signal.addEventListener('abort', onAbort);
+    try {
+      const data = await Promise.any(OVERPASS.map((url, i) => postWithTimeout(url, body, 20000, ctls[i].signal)));
+      ctls.forEach(c => c.abort()); // stop the slower request
+      const seen = new Set();
+      const list = data.elements.map(el => normalize(el, lat, lon)).filter(p => p && !seen.has(p.id) && seen.add(p.id)).sort((a, b) => a.dist - b.dist);
+      list.capped = data.elements.length >= RESULT_CAP; // very dense area: the server stopped early
+      return list;
+    } catch (e) {
+      throw (e && e.errors && e.errors[0]) || e;
+    } finally {
+      if (signal) signal.removeEventListener('abort', onAbort);
     }
-    throw lastErr || new Error('fetch failed');
   }
   async function geocode(query) {
     const res = await fetch('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=' + encodeURIComponent(query));
@@ -463,38 +519,86 @@
     } catch (e) { return 'Current location'; }
   }
 
-  /* ---------- Sample data (preview only) ---------- */
-  const DEMO = [
-    ['Basil & Bun Burger Co.', ['Burgers'], 0.4, '(555) 010-0101', 'Mo-Su 11:00-21:00'],
-    ["Nonna Rosa's Trattoria", ['Italian'], 0.9, '(555) 010-0102', 'Tu-Su 16:00-22:00'],
-    ['Golden Lantern', ['Chinese'], 1.1, '(555) 010-0103', 'Mo-Su 11:00-22:00'],
-    ['Taco Telefono', ['Mexican', 'Fast food'], 0.6, '(555) 010-0104', 'Mo-Su 10:00-23:00'],
-    ['Pho Real', ['Vietnamese'], 1.8, '(555) 010-0105', 'Mo-Sa 10:30-20:00'],
-    ['The Daily Griddle', ['American', 'Breakfast'], 0.7, '(555) 010-0106', 'Mo-Su 06:30-14:00'],
-    ['Smokestack BBQ', ['BBQ'], 2.4, '(555) 010-0107', 'We-Su 11:00-20:00'],
-    ['Sakura Sushi Bar', ['Sushi', 'Japanese'], 1.5, '(555) 010-0108', 'Tu-Su 17:00-22:30'],
-    ['Curry Leaf', ['Indian'], 2.1, '(555) 010-0109', ''],
-    ['Olive Branch Kitchen', ['Mediterranean'], 2.7, '(555) 010-0110', 'Mo-Sa 11:00-21:00'],
-    ['Crispy Coop', ['Chicken', 'Fast food'], 0.3, '(555) 010-0111', '24/7'],
-    ['Slice Brothers Pizza', ['Pizza'], 1.2, '(555) 010-0112', 'Mo-Su 11:00-02:00'],
-    ['Thai Basil House', ['Thai'], 3.6, '(555) 010-0113', 'Mo-Su 11:00-21:30'],
-    ['Harbor Fish Shack', ['Seafood'], 4.2, '(555) 010-0114', 'Th-Su 12:00-20:00']
-  ].map((d, i) => ({
-    id: 'demo' + i, name: d[0], lat: 40 + i * 0.002, lon: -83 + i * 0.002, dist: d[2], cuisines: d[1],
-    phone: d[3], website: i % 3 === 0 ? 'https://example.com' : '', menu: i % 2 === 0 ? 'https://example.com/menu' : '',
-    address: `${100 + i * 12} Main St`, hours: d[4], hoursParsed: parseHours(d[4])
-  }));
+  /* ---------- Duplicates: one of each restaurant or chain, the closest one ---------- */
+  // "McDonald's", "McDonalds", "Mc Donald's Restaurant" all become "mcdonalds".
+  function compactName(s) {
+    return s.normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase()
+      .replace(/&/g, ' and ').replace(/['’`´]/g, '').replace(/[^a-z0-9]+/g, ' ')
+      .replace(/^the /, '').replace(/ (restaurant|restaurants)$/, '').replace(/ /g, '');
+  }
+  // Every place gets the keys that identify its restaurant or chain.
+  function keysFor(p) {
+    const keys = ['n:' + p.compact];
+    if (p.brand) keys.push('b:' + p.brand.toLowerCase());
+    if (p.chainName) keys.push('c:' + p.chainName);
+    return keys;
+  }
+  function dedupe(sortedByDistance) {
+    const seen = new Set();
+    return sortedByDistance.filter(p => {
+      if (p.keys.some(k => seen.has(k))) return false;
+      p.keys.forEach(k => seen.add(k));
+      return true;
+    });
+  }
+
+  /* ---------- Chains (for "Local restaurants only") ---------- */
+  // Common US chains. Most chain listings are also tagged with a brand in OpenStreetMap;
+  // this list catches the ones that aren't.
+  const CHAINS = `mcdonalds burgerking wendys tacobell subway kfc kentuckyfriedchicken pizzahut dominos papajohns
+    littlecaesars chickfila chipotle chipotlemexicangrill panera panerabread starbucks dunkin dunkindonuts sonic
+    sonicdrivein arbys dairyqueen popeyes popeyeslouisianakitchen jimmyjohns jerseymikes jerseymikessubs
+    firehousesubs fiveguys culvers whataburger innout innoutburger whitecastle jackinthebox carlsjr hardees
+    checkers rallys deltaco elpolloloco qdoba moes moessouthwestgrill pandaexpress pfchangs olivegarden
+    redlobster applebees chilis tgifridays rubytuesday outback outbacksteakhouse texasroadhouse longhorn
+    longhornsteakhouse crackerbarrel bobevans ihop dennys wafflehouse perkins buffalowildwings bdubs hooters
+    redrobin cheesecakefactory thecheesecakefactory bjsrestaurant bjsrestaurantandbrewhouse goldencorral
+    steaknshake skylinechili goldstarchili marcospizza hungryhowies jetspizza papamurphys cicis cicispizza
+    roundtablepizza sbarro raisingcanes zaxbys bojangles churchs churchschicken wingstop captainds
+    longjohnsilvers krispykreme timhortons baskinrobbins coldstonecreamery ritas auntieannes cinnabon jamba
+    jambajuice smoothieking tropicalsmoothiecafe noodlesandcompany noodlescompany potbelly potbellysandwichshop
+    mcalistersdeli schlotzskys whichwich quiznos blimpie pennstation pennstationeastcoastsubs charleys
+    charleysphillysteaks wawa sheetz 7eleven speedway caseys chuckecheese daveandbusters logansroadhouse
+    bonefishgrill carrabbas carrabbasitaliangrill maggianos bucadibeppo famousdaves sonnysbbq citybarbeque
+    missionbbq shakeshack smashburger freddys freddysfrozencustard portillos steakescape tacojohns tacobueno
+    rubios chuys ontheborder fazolis frischs frischsbigboy bigboy eatnpark friendlys jollibee peiwei benihana
+    yardhouse twinpeaks pizzaranch godfatherspizza donatos donatospizza larosas pizzainn eastofchicago
+    eastofchicagopizza ledopizza modpizza blazepizza pieology dickeys dickeysbarbecuepit goldenchick
+    leesfamousrecipe leesfamousrecipechicken krystal cookout biscuitville firstwatch huddlehouse villageinn
+    blackbeardiner fuddruckers marcos bjs dutchbros dutchbroscoffee tijuanaflats habit habitburger
+    thehabitburgergrill cava sweetgreen wingstop crumbl crumblcookies insomniacookies tacocabana
+    hwy55 hwy55burgersshakesfries zoesskitchen zoeskitchen saladworks cheddars cheddarsscratchkitchen
+    oharas oharasirishpub cheddarskitchen bobevansrestaurant` .trim().split(/\s+/);
+  const CHAIN_SET = new Set(CHAINS);
+  function chainFromName(compact) {
+    if (CHAIN_SET.has(compact)) return compact;
+    // "Wendy's Old Fashioned Hamburgers", "Applebee's Grill + Bar", "Domino's Pizza"…
+    for (const c of CHAINS) if (c.length >= 4 && compact.startsWith(c)) return c;
+    return '';
+  }
+  // Mark chains: a brand tag, a known chain name, or the same name at 3+ spots nearby.
+  function markChains(list) {
+    const counts = new Map();
+    list.forEach(p => counts.set(p.compact, (counts.get(p.compact) || 0) + 1));
+    list.forEach(p => { p.chain = !!(p.brand || p.chainName || counts.get(p.compact) >= 3); });
+  }
 
   /* ---------- Filtering ---------- */
   function effective() {
     return state.mode === 'any'
-      ? { radius: DEFAULT_RADIUS_MI, cuisines: new Set(), openNow: false }
-      : { radius: state.radius, cuisines: state.cuisines, openNow: state.openNow };
+      ? { radius: DEFAULT_RADIUS_MI, cuisines: new Set(), openNow: false, localOnly: false }
+      : { radius: state.radius, cuisines: state.cuisines, openNow: state.openNow, localOnly: state.localOnly };
   }
   function basePool() {
     const f = effective();
     const now = new Date();
-    return state.all.filter(p => !state.excluded.has(p.id) && p.dist <= f.radius && (!f.openNow || openState(p, now) !== 'closed'));
+    // 1. drop hidden, closed-right-now (if asked) and chains (if asked)
+    const usable = state.all.filter(p => !hidden.has(p.id)
+      && (!f.openNow || openState(p, now) !== 'closed')
+      && (!f.localOnly || !p.chain));
+    // 2. one per restaurant or chain: the closest usable one
+    // 3. drop anything taken off the wheel (the whole chain), then apply distance
+    return dedupe(usable).filter(p => !p.keys.some(k => state.excluded.has(k)) && p.dist <= f.radius);
   }
   function shuffle(a) {
     const arr = a.slice();
@@ -553,7 +657,9 @@
       return;
     }
     const seg = TAU / n;
-    const hubR = size * 0.125 + 6;
+    const hubR = size * 0.125 + 4;               // the Spin button covers the middle
+    const textX = (hubR + R) / 2;                // centered between the button and the rim
+    const textMax = R - hubR - 18;
     const fs = Math.max(11, Math.min(17, size * (n > 8 ? 0.04 : 0.047)));
     ctx.save();
     ctx.translate(c, c);
@@ -567,11 +673,11 @@
 
       ctx.save();
       ctx.rotate(a0 + seg / 2);
-      ctx.textAlign = 'right';
+      ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.font = `700 ${fs}px "Figtree", system-ui, sans-serif`;
       ctx.fillStyle = PALETTE_TEXT[k];
-      ctx.fillText(fitText(wheel[i].name, R - hubR - 22), R - 14, 0);
+      ctx.fillText(fitText(wheel[i].name, textMax), textX, 0);
       ctx.restore();
     }
     ctx.restore();
@@ -602,6 +708,7 @@
       setControlsDisabled(false);
       try { navigator.vibrate && navigator.vibrate(40); } catch (e) { /* ignore */ }
       showResult(state.wheel[t]);
+      if (state.pendingRefresh) { state.pendingRefresh = false; refresh({ keepRotation: true }); }
     };
     requestAnimationFrame(frame);
   }
@@ -694,10 +801,9 @@
     const m = $('#setupMsg');
     m.textContent = text || '';
     m.classList.toggle('error', !!isError);
-    if (offerDemo) $('#demoBtn').hidden = false;
   }
 
-  const DIST_OPTIONS = [0.5, 1, 3, 5];
+  const DIST_OPTIONS = [0.5, 1, 3, 5, 10];
   function renderDistChips() {
     const box = $('#distChips'); box.replaceChildren();
     DIST_OPTIONS.forEach(d => {
@@ -741,31 +847,77 @@
     drawWheel();
 
     const info = $('#poolInfo');
-    if (state.busy) info.textContent = 'Finding restaurants…';
+    if (state.busy) info.textContent = state.all.length ? `Loading places up to ${state.loadNeed} mi…` : 'Finding restaurants…';
+    else if (state.loadError) info.textContent = state.loadError;
     else if (pool.length === 0) info.textContent = state.all.length ? 'Nothing matches. Try loosening a filter.' : 'No restaurants found here. Try a different location.';
     else if (pool.length === 1) info.textContent = 'Only one place matches. Loosen a filter to spin.';
     else info.textContent = pool.length <= MAX_ON_WHEEL ? `${pool.length} places on the wheel` : `${MAX_ON_WHEEL} of ${pool.length} places on the wheel`;
-    $('#reshuffleBtn').hidden = pool.length <= MAX_ON_WHEEL;
-    $('#demoNote').hidden = !state.demo;
+    $('#reshuffleBtn').hidden = pool.length <= MAX_ON_WHEEL || !!state.loadError;
+    $('#retryBtn').hidden = !(state.loadError && !state.busy);
+    $('#loadbar').hidden = !state.busy;
     $('#openSwitch').setAttribute('aria-checked', String(state.openNow));
+    $('#localSwitch').setAttribute('aria-checked', String(state.localOnly));
     renderDistChips();
-    setControlsDisabled(state.spinning || state.busy);
+    // Only a spinning wheel locks the controls. Loading in the background never does.
+    setControlsDisabled(state.spinning);
   }
 
+  function cancelLoad() {
+    if (state.loadCtl) { state.loadCtl.abort(); state.loadCtl = null; }
+    state.busy = false;
+  }
+  // If new data arrives while the wheel is spinning, wait until it stops.
+  function refreshWhenIdle() {
+    if (state.spinning) state.pendingRefresh = true; else refresh();
+  }
   async function ensureData() {
     if (!state.loc) return;
-    const need = Math.max(DEFAULT_RADIUS_MI, state.mode === 'narrow' ? state.radius : 0);
-    if (state.demo || (state.all.length && state.fetchedRadius >= need)) { refresh(); return; }
-    state.busy = true; refresh();
+    // Load the widest distance once, so switching modes or distances never waits on the network.
+    const need = MAX_RADIUS_MI;
+    // Already have enough places: use them, and drop any download that is no longer needed.
+    if (state.demo || (state.all.length && state.fetchedRadius >= need)) {
+      cancelLoad(); state.loadError = ''; refresh(); return;
+    }
+    // Already downloading at least this much.
+    if (state.busy && state.loadNeed >= need) { refresh(); return; }
+
+    cancelLoad();
+    const loc = state.loc;
+    const ctl = new AbortController();
+    state.loadCtl = ctl; state.busy = true; state.loadNeed = need; state.loadError = '';
+    refresh();
     try {
-      const list = await fetchPlaces(state.loc.lat, state.loc.lon, need);
-      state.all = list; state.fetchedRadius = need;
-      state.busy = false;
-      refresh();
+      let list = await fetchPlaces(loc.lat, loc.lon, need, ctl.signal);
+      // Very dense area (a big city): the server only sent part of the list,
+      // so also load the closer distances in full.
+      for (const closer of [3, 1]) {
+        if (!list.capped) break;
+        try {
+          const more = await fetchPlaces(loc.lat, loc.lon, closer, ctl.signal);
+          const capped = more.capped;
+          list = list.concat(more); list.capped = capped;
+        } catch (e) { break; /* keep what we have */ }
+      }
+      if (state.loadCtl !== ctl) return;               // replaced or cancelled
+      state.loadCtl = null; state.busy = false;
+      const merged = new Map(state.all.map(p => [p.id, p]));
+      list.forEach(p => merged.set(p.id, p));          // keep what we already had
+      // Keep every location; the wheel picks the closest of each chain when it's built.
+      state.all = [...merged.values()].sort((a, b) => a.dist - b.dist);
+      markChains(state.all);
+      state.fetchedRadius = need;
+      refreshWhenIdle();
     } catch (e) {
-      state.busy = false;
-      if (state.all.length) { refresh(); $('#poolInfo').textContent = "Couldn't load more places. Check your connection."; }
-      else {
+      if (state.loadCtl !== ctl) return;
+      state.loadCtl = null; state.busy = false;
+      if (state.all.length) {
+        // Fall back to the places we already have instead of leaving the wheel stuck.
+        state.failedNeed = need;
+        state.loadError = `Couldn't load places up to ${need} mi.`;
+        state.radius = DIST_OPTIONS.filter(d => d <= state.fetchedRadius).pop() || DEFAULT_RADIUS_MI;
+        refreshWhenIdle();
+      } else {
+        state.loadError = '';
         state.loc = null; state.wheel = SETUP_WHEEL; drawWheel();
         setView('setup');
         $('#spinBtn').disabled = true;
@@ -779,6 +931,7 @@
     $('#placeBtn').disabled = false;
   }
   async function startAt(loc) {
+    cancelLoad(); state.loadError = '';
     state.loc = loc; state.demo = false;
     state.all = []; state.fetchedRadius = 0; state.excluded.clear(); state.cuisines.clear();
     store.set('loc', loc);
@@ -789,7 +942,7 @@
 
   // Location: GPS
   $('#locateBtn').addEventListener('click', () => {
-    setSetupMsg(''); $('#demoBtn').hidden = true;
+    setSetupMsg('');
     if (!navigator.geolocation) { setSetupMsg('Location is not available here. Enter a city or ZIP code instead.', true); return; }
     $('#locateBtn').disabled = true; $('#locateBtn').textContent = 'Finding you…';
     navigator.geolocation.getCurrentPosition(async pos => {
@@ -806,7 +959,7 @@
   async function searchPlace() {
     const q = $('#placeInput').value.trim();
     if (!q) { setSetupMsg('Enter a city or ZIP code.', true); return; }
-    setSetupMsg(''); $('#demoBtn').hidden = true;
+    setSetupMsg('');
     $('#placeBtn').disabled = true;
     try {
       const loc = await geocode(q);
@@ -821,14 +974,9 @@
   $('#placeBtn').addEventListener('click', searchPlace);
   $('#placeInput').addEventListener('keydown', e => { if (e.key === 'Enter') searchPlace(); });
 
-  $('#demoBtn').addEventListener('click', () => {
-    state.loc = { lat: 40, lon: -83, label: 'Sample places' };
-    state.demo = true; state.all = DEMO; state.fetchedRadius = 5; state.excluded.clear(); state.cuisines.clear();
-    setView('play'); refresh();
-  });
-
   $('#locBtn').addEventListener('click', () => {
     closeSheet(true);
+    cancelLoad(); state.loadError = '';
     state.loc = null; state.wheel = SETUP_WHEEL; state.rot = 0; drawWheel();
     $('#spinBtn').disabled = true;
     setView('setup'); setSetupMsg(''); $('#placeInput').focus();
@@ -845,7 +993,9 @@
   $('#modeAny').addEventListener('click', () => setMode('any'));
   $('#modeNarrow').addEventListener('click', () => setMode('narrow'));
   $('#openSwitch').addEventListener('click', () => { state.openNow = !state.openNow; refresh(); });
+  $('#localSwitch').addEventListener('click', () => { state.localOnly = !state.localOnly; refresh(); });
   $('#reshuffleBtn').addEventListener('click', () => refresh({ keepRotation: true }));
+  $('#retryBtn').addEventListener('click', () => { if (state.failedNeed) state.radius = state.failedNeed; ensureData(); });
   $('#spinBtn').addEventListener('click', spin);
 
   // Sheet
@@ -853,7 +1003,17 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
   $('#againBtn').addEventListener('click', () => { closeSheet(true); setTimeout(spin, 150); });
   $('#removeBtn').addEventListener('click', () => {
-    if (state.current) state.excluded.add(state.current.id);
+    // Removes the whole restaurant or chain, so another location doesn't take its place.
+    if (state.current) state.current.keys.forEach(k => state.excluded.add(k));
+    closeSheet(true);
+    refresh({ keepRotation: true });
+  });
+  // Remembered on this phone, so a closed or wrong listing never comes back.
+  $('#hideBtn').addEventListener('click', () => {
+    if (state.current) {
+      hidden.add(state.current.id);
+      store.set('hidden', [...hidden].slice(-500));
+    }
     closeSheet(true);
     refresh({ keepRotation: true });
   });
