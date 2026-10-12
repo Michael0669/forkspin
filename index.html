@@ -188,6 +188,13 @@
   .ad-inner { max-width: 480px; margin: 0 auto; height: var(--ad-h); display: flex; align-items: center; justify-content: center; position: relative; color: var(--muted); font-size: 13px; }
   .ad-inner .tag { position: absolute; top: 3px; left: 10px; font-size: 10px; opacity: .8; }
 
+  /* Optional support: one quiet link at the bottom of the page */
+  .support-link { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 22px auto 4px; color: var(--muted); font-weight: 500; }
+  .support-link svg { color: var(--accent); }
+  .support-sheet h2 { font-size: 26px; }
+  .support-sheet p { margin: 0 0 16px; color: var(--muted); font-size: 16px; line-height: 1.5; }
+  .support-sheet .later { display: block; margin: 6px auto 0; color: var(--muted); font-weight: 500; }
+
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   @media (prefers-reduced-motion: reduce) {
     .sheet { animation: none; }
@@ -262,6 +269,19 @@
       </div>
     </div>
   </section>
+
+  <button class="link-btn support-link" id="supportBtn" hidden>
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.2C.9 8.4 3 4.5 6.7 4.5c2.1 0 3.6 1.2 4.3 2.6h2c.7-1.4 2.2-2.6 4.3-2.6 3.7 0 5.8 3.9 4.3 7.3C19.5 16.4 12 21 12 21z"/></svg>
+    Enjoying Forkspin? Leave a tip
+  </button>
+</div>
+
+<!-- Support (optional tip) -->
+<div class="sheet support-sheet" id="supportSheet" role="dialog" aria-modal="true" aria-labelledby="supportTitle" tabindex="-1" hidden>
+  <h2 id="supportTitle">Forkspin is free for everyone</h2>
+  <p>No subscriptions and nothing locked away. If it's helped settle a "where should we eat?" debate, a tip helps keep it running and free.</p>
+  <a class="btn primary" id="supportGo" target="_blank" rel="noopener noreferrer">Leave a tip</a>
+  <button class="link-btn later" id="supportLater">Maybe later</button>
 </div>
 
 <!-- Result -->
@@ -297,6 +317,9 @@
   const DEFAULT_RADIUS_MI = 3;
   const MAX_RADIUS_MI = 10;     // everything up to this distance loads once, up front
   const RESULT_CAP = 1000;
+  // Optional tips. Paste the tip page link here (for example https://ko-fi.com/yourname).
+  // While it's empty, the support button stays hidden.
+  const SUPPORT_URL = '';
   const PALETTE = ['#D63B22', '#F2B33D', '#2E9A6B', '#3568A8', '#8B4A9C', '#EE8446'];
   const PALETTE_TEXT = ['#FFFFFF', '#14304A', '#FFFFFF', '#FFFFFF', '#FFFFFF', '#14304A'];
   const SETUP_WHEEL = ['Tacos', 'Pizza', 'Sushi', 'Burgers', 'Thai', 'BBQ', 'Pho', 'Curry'].map(name => ({ name }));
@@ -776,10 +799,25 @@
     $('#sheet').focus();
   }
   function closeSheet(silent) {
+    closeSupport(true);
     if ($('#sheet').hidden) return;
     $('#sheet').hidden = true;
     $('#scrim').hidden = true;
     if (!silent) $('#spinBtn').focus();
+  }
+
+  /* ---------- Optional support ---------- */
+  function openSupport() {
+    closeSheet(true);
+    $('#scrim').hidden = false;
+    $('#supportSheet').hidden = false;
+    $('#supportSheet').focus();
+  }
+  function closeSupport(silent) {
+    if ($('#supportSheet').hidden) return;
+    $('#supportSheet').hidden = true;
+    $('#scrim').hidden = true;
+    if (!silent) $('#supportBtn').focus();
   }
 
   /* ---------- UI wiring ---------- */
@@ -999,8 +1037,17 @@
   $('#spinBtn').addEventListener('click', spin);
 
   // Sheet
-  $('#scrim').addEventListener('click', () => closeSheet());
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
+  $('#scrim').addEventListener('click', () => { closeSupport(); closeSheet(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeSupport(); closeSheet(); } });
+
+  const supportUrl = safeUrl(SUPPORT_URL);
+  if (supportUrl) {
+    $('#supportGo').href = supportUrl;
+    $('#supportBtn').hidden = false;
+    $('#supportBtn').addEventListener('click', openSupport);
+    $('#supportLater').addEventListener('click', () => closeSupport());
+    $('#supportGo').addEventListener('click', () => closeSupport(true));
+  }
   $('#againBtn').addEventListener('click', () => { closeSheet(true); setTimeout(spin, 150); });
   $('#removeBtn').addEventListener('click', () => {
     // Removes the whole restaurant or chain, so another location doesn't take its place.
