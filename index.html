@@ -301,6 +301,7 @@
       <button class="btn" id="placeBtn">Go</button>
     </div>
     <p class="msg" id="setupMsg" role="status"></p>
+    <button class="btn" id="retrySetupBtn" style="margin-top:12px" hidden>Try again</button>
   </section>
 
   <!-- Play: shown once restaurants are loaded -->
@@ -404,7 +405,8 @@
   const TAU = Math.PI * 2;
   const MAX_ON_WHEEL = 10;
   const DEFAULT_RADIUS_MI = 3;
-  const MAX_RADIUS_MI = 10;     // everything up to this distance loads once, up front
+  const NEAR_RADIUS_MI = 3;     // loads first, so the wheel is ready quickly
+  const MAX_RADIUS_MI = 20;     // the rest loads in the background
   const RESULT_CAP = 1000;
   // Optional tips. Paste the tip page link here (for example https://ko-fi.com/yourname).
   // While it's empty, the support button stays hidden.
@@ -533,7 +535,13 @@
   }
 
   /* ---------- Data: OpenStreetMap (free, no API key) ---------- */
-  const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
+  // Public OpenStreetMap search servers (wiki.openstreetmap.org/wiki/Overpass_API).
+  // The main server is often overloaded, so it's tried last.
+  const OVERPASS = [
+    { url: 'https://overpass.private.coffee/api/interpreter', delay: 0 },
+    { url: 'https://maps.mail.ru/osm/tools/overpass/api/interpreter', delay: 0 },
+    { url: 'https://overpass-api.de/api/interpreter', delay: 4000 }
+  ];
   const milesBetween = (lat1, lon1, lat2, lon2) => {
     const R = 3958.8, rad = x => x * Math.PI / 180;
     const dLat = rad(lat2 - lat1), dLon = rad(lon2 - lon1);
@@ -593,17 +601,31 @@
     p.keys = keysFor(p);
     return p;
   }
-  // Asks both free servers at the same time and uses whichever answers first.
-  // Gives up after 15 seconds, or right away if `signal` is aborted.
+  // Asks several free servers and uses whichever answers first. The two without
+  // usage limits start right away; the busy main server joins only if they're slow.
+  // Each gives up after 25 seconds, or right away if `signal` is aborted.
+  const wait = (ms, signal) => new Promise((resolve, reject) => {
+    if (!ms) return resolve();
+    const t = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); });
+  });
   async function fetchPlaces(lat, lon, miles, signal) {
     const r = Math.round(miles * 1609.34);
-    const q = `[out:json][timeout:20];(node["amenity"~"^(restaurant|fast_food)$"]["name"](around:${r},${lat},${lon});way["amenity"~"^(restaurant|fast_food)$"]["name"](around:${r},${lat},${lon}););out center tags ${RESULT_CAP};`;
+    const q = `[out:json][timeout:25];(node["amenity"~"^(restaurant|fast_food)$"]["name"](around:${r},${lat},${lon});way["amenity"~"^(restaurant|fast_food)$"]["name"](around:${r},${lat},${lon}););out center tags ${RESULT_CAP};`;
     const body = 'data=' + encodeURIComponent(q);
     const ctls = OVERPASS.map(() => new AbortController());
     const onAbort = () => ctls.forEach(c => c.abort());
     if (signal) signal.addEventListener('abort', onAbort);
+    // If every server that started right away has already failed, start the rest now.
+    let firstFailures = 0, startRest;
+    const restStarted = new Promise(resolve => { startRest = resolve; });
+    const firstCount = OVERPASS.filter(s => !s.delay).length;
     try {
-      const data = await Promise.any(OVERPASS.map((url, i) => postWithTimeout(url, body, 20000, ctls[i].signal)));
+      const data = await Promise.any(OVERPASS.map((s, i) =>
+        (s.delay ? Promise.race([wait(s.delay, ctls[i].signal), restStarted]) : Promise.resolve())
+          .then(() => postWithTimeout(s.url, body, 25000, ctls[i].signal))
+          .then(d => { if (!d || !Array.isArray(d.elements)) throw new Error('bad answer'); return d; })
+          .catch(err => { if (!s.delay && ++firstFailures >= firstCount) startRest(); throw err; })));
       ctls.forEach(c => c.abort()); // stop the slower request
       const seen = new Set();
       const list = data.elements.map(el => normalize(el, lat, lon)).filter(p => p && !seen.has(p.id) && seen.add(p.id)).sort((a, b) => a.dist - b.dist);
@@ -1115,7 +1137,7 @@
     m.classList.toggle('error', !!isError);
   }
 
-  const DIST_OPTIONS = [0.5, 1, 3, 5, 10];
+  const DIST_OPTIONS = [1, 3, 5, 10, 20];
   function renderDistChips() {
     const box = $('#distChips'); box.replaceChildren();
     DIST_OPTIONS.forEach(d => {
@@ -1159,14 +1181,18 @@
     drawWheel();
 
     const info = $('#poolInfo');
-    if (state.busy) info.textContent = state.all.length ? `Loading places up to ${state.loadNeed} mi…` : 'Finding restaurants…';
+    const loadingMore = state.busy && state.all.length > 0;
+    if (state.busy && !state.all.length) info.textContent = 'Finding restaurants…';
     else if (state.loadError) info.textContent = state.loadError;
     else if (pool.length === 0) {
       const anyNearby = state.all.some(p => p.dist <= MAX_RADIUS_MI);
-      info.textContent = anyNearby ? 'Nothing matches. Try loosening a filter.' : `No restaurants found within ${MAX_RADIUS_MI} miles. Try a different location.`;
+      info.textContent = loadingMore ? `Loading places up to ${state.loadNeed} mi…`
+        : anyNearby ? 'Nothing matches. Try loosening a filter.' : `No restaurants found within ${MAX_RADIUS_MI} miles. Try a different location.`;
     }
     else if (pool.length === 1) info.textContent = 'Only one place matches. Loosen a filter to spin.';
     else info.textContent = pool.length <= MAX_ON_WHEEL ? `${pool.length} places on the wheel` : `${MAX_ON_WHEEL} of ${pool.length} places on the wheel`;
+    // The wheel is usable while farther places keep arriving in the background.
+    if (loadingMore && pool.length > 0) info.textContent += `. Adding places up to ${state.loadNeed} mi…`;
     $('#reshuffleBtn').hidden = pool.length <= MAX_ON_WHEEL || !!state.loadError;
     $('#retryBtn').hidden = !(state.loadError && !state.busy);
     $('#loadbar').hidden = !state.busy;
@@ -1185,77 +1211,99 @@
   function refreshWhenIdle() {
     if (state.spinning) state.pendingRefresh = true; else refresh();
   }
+  // Loading happens in two steps: nearby places first, so the wheel is ready quickly,
+  // then everything out to MAX_RADIUS_MI in the background.
+  async function loadRadius(loc, miles, signal) {
+    let list = await fetchPlaces(loc.lat, loc.lon, miles, signal);
+    // Very dense area (a big city): the server sent only part of the list,
+    // so also load the closest mile in full.
+    if (list.capped && miles > 1) {
+      try { list = list.concat(await fetchPlaces(loc.lat, loc.lon, 1, signal)); } catch (e) { /* keep what we have */ }
+    }
+    return list;
+  }
+  function mergePlaces(list) {
+    const merged = new Map(state.all.map(p => [p.id, p]));
+    list.forEach(p => merged.set(p.id, p));            // keep what we already had
+    // Keep every location; the wheel picks the closest of each chain when it's built.
+    state.all = [...merged.values()].sort((a, b) => a.dist - b.dist);
+    markChains(state.all);
+  }
+  let lastFailedLoc = null;
   async function ensureData() {
     if (!state.loc) return;
-    // Load the widest distance once, so switching modes or distances never waits on the network.
-    const need = MAX_RADIUS_MI;
-    // Already have enough places: use them, and drop any download that is no longer needed.
-    if (state.demo || (state.all.length && state.fetchedRadius >= need)) {
+    if (state.demo || (state.all.length && state.fetchedRadius >= MAX_RADIUS_MI)) {
       cancelLoad(); state.loadError = ''; refresh(); return;
     }
-    // Already downloading at least this much.
-    if (state.busy && state.loadNeed >= need) { refresh(); return; }
-
-    cancelLoad();
+    if (state.busy) { refresh(); return; }               // already loading
     const loc = state.loc;
+    state.loadError = '';
 
-    // Opened again near the same spot recently? Use the saved list instantly.
-    const cached = readCache(loc);
-    if (cached) {
-      state.all = cached; markChains(state.all);
-      state.fetchedRadius = need; state.loadError = '';
-      hideLoader(); refresh();
-      return;
+    // 1. Opened again near the same spot recently? Use the saved list right away.
+    if (!state.all.length) {
+      const cached = readCache(loc, CACHE_HOURS, CACHE_NEAR_MI);
+      if (cached) {
+        state.all = cached.places; markChains(state.all);
+        state.fetchedRadius = cached.radius;
+        hideLoader(); refresh();
+        if (state.fetchedRadius >= MAX_RADIUS_MI) return;
+      }
     }
 
     const ctl = new AbortController();
-    state.loadCtl = ctl; state.busy = true; state.loadNeed = need; state.loadError = '';
-    if (!state.all.length) {
-      showLoader('Finding restaurants', `Looking for places within ${MAX_RADIUS_MI} miles of ${loc.label && loc.label !== 'Near you' ? loc.label.split(',')[0] : 'you'}.`,
-        'Still searching. The free map server is busy right now, so this can take up to half a minute.');
-    }
-    refresh();
+    state.loadCtl = ctl; state.busy = true;
     try {
-      let list = await fetchPlaces(loc.lat, loc.lon, need, ctl.signal);
-      // Very dense area (a big city): the server only sent part of the list,
-      // so also load the closer distances in full.
-      for (const closer of [3, 1]) {
-        if (!list.capped) break;
-        try {
-          const more = await fetchPlaces(loc.lat, loc.lon, closer, ctl.signal);
-          const capped = more.capped;
-          list = list.concat(more); list.capped = capped;
-        } catch (e) { break; /* keep what we have */ }
+      // 2. Nearby first, behind the loading screen.
+      if (state.fetchedRadius < NEAR_RADIUS_MI) {
+        state.loadNeed = NEAR_RADIUS_MI;
+        showRestaurantLoader();
+        refresh();
+        const near = await loadRadius(loc, NEAR_RADIUS_MI, ctl.signal);
+        if (state.loadCtl !== ctl) return;               // replaced or cancelled
+        mergePlaces(near);
+        state.fetchedRadius = NEAR_RADIUS_MI;
+        writeCache(loc, state.all, NEAR_RADIUS_MI);
+        hideLoader();
+        refreshWhenIdle();
       }
-      if (state.loadCtl !== ctl) return;               // replaced or cancelled
+      // 3. Farther places in the background. The wheel is already usable.
+      state.loadNeed = MAX_RADIUS_MI;
+      refreshWhenIdle();
+      const far = await loadRadius(loc, MAX_RADIUS_MI, ctl.signal);
+      if (state.loadCtl !== ctl) return;
       state.loadCtl = null; state.busy = false;
-      const merged = new Map(state.all.map(p => [p.id, p]));
-      list.forEach(p => merged.set(p.id, p));          // keep what we already had
-      // Keep every location; the wheel picks the closest of each chain when it's built.
-      state.all = [...merged.values()].sort((a, b) => a.dist - b.dist);
-      markChains(state.all);
-      state.fetchedRadius = need;
-      writeCache(loc, state.all);
-      hideLoader();
+      mergePlaces(far);
+      state.fetchedRadius = MAX_RADIUS_MI;
+      writeCache(loc, state.all, MAX_RADIUS_MI);
       refreshWhenIdle();
     } catch (e) {
       if (state.loadCtl !== ctl) return;
       state.loadCtl = null; state.busy = false;
       hideLoader();
       if (state.all.length) {
-        // Fall back to the places we already have instead of leaving the wheel stuck.
-        state.failedNeed = need;
-        state.loadError = `Couldn't load places up to ${need} mi.`;
-        state.radius = DIST_OPTIONS.filter(d => d <= state.fetchedRadius).pop() || DEFAULT_RADIUS_MI;
+        // Keep the places we already have instead of leaving the wheel stuck.
+        state.failedNeed = MAX_RADIUS_MI;
+        state.loadError = `Couldn't load places farther than ${state.fetchedRadius} mi.`;
+        if (state.radius > state.fetchedRadius) state.radius = DIST_OPTIONS.filter(d => d <= state.fetchedRadius).pop() || DEFAULT_RADIUS_MI;
         refreshWhenIdle();
-      } else {
-        state.loadError = '';
-        state.loc = null; state.wheel = SETUP_WHEEL; drawWheel();
-        setView('setup');
-        $('#spinBtn').disabled = true;
-        setSetupMsg("Couldn't reach the restaurant database. Check your connection and try again.", true, true);
-        resetSetupButtons();
+        return;
       }
+      // Nothing loaded: use an older saved list for this area if there is one.
+      const old = readCache(loc, STALE_HOURS, STALE_NEAR_MI);
+      if (old) {
+        state.all = old.places; markChains(state.all);
+        state.fetchedRadius = old.radius;
+        refresh();
+        toast(`The map server isn't responding, so these are restaurants saved ${ago(old.time)}.`);
+        return;
+      }
+      lastFailedLoc = loc;
+      state.loc = null; state.wheel = SETUP_WHEEL; drawWheel();
+      setView('setup');
+      $('#spinBtn').disabled = true;
+      setSetupMsg("The free map server isn't responding right now. Try again in a minute, or enter a nearby city.", true);
+      $('#retrySetupBtn').hidden = false;
+      resetSetupButtons();
     }
   }
   function resetSetupButtons() {
@@ -1263,8 +1311,9 @@
     $('#placeBtn').disabled = false;
   }
   /* ---------- Loading screen ---------- */
-  let slowTimer = 0;
+  let slowTimer = 0, funTimer = 0;
   function showLoader(title, text, slowText) {
+    clearInterval(funTimer);
     $('#loaderTitle').textContent = title;
     $('#loaderText').textContent = text;
     $('#loaderSlow').textContent = slowText || '';
@@ -1273,25 +1322,39 @@
     clearTimeout(slowTimer);
     if (slowText) slowTimer = setTimeout(() => { $('#loaderSlow').hidden = false; }, 8000);
   }
-  function hideLoader() { $('#loader').hidden = true; clearTimeout(slowTimer); }
+  // A few light lines so the wait feels shorter.
+  const LOADER_LINES = [
+    'Looking for places near you…', 'Checking who has their lights on…', 'Counting the pizza places…',
+    'Skipping the places that closed…', 'Leaving room for dessert…', 'Warming up the wheel…'
+  ];
+  function showRestaurantLoader() {
+    showLoader('Finding restaurants', LOADER_LINES[0],
+      'Still searching. The free map server is busy right now, so this can take up to half a minute.');
+    let i = 0;
+    funTimer = setInterval(() => { i = (i + 1) % LOADER_LINES.length; $('#loaderText').textContent = LOADER_LINES[i]; }, 2200);
+  }
+  function hideLoader() { $('#loader').hidden = true; clearTimeout(slowTimer); clearInterval(funTimer); }
 
   /* ---------- Saved results (this device only) ---------- */
-  // Reopening the app near the same spot within 12 hours skips the slow map search.
-  const CACHE_KEY = 'places-v1', CACHE_HOURS = 12, CACHE_NEAR_MI = 0.5;
-  function writeCache(loc, places) {
+  // Reopening the app near the same spot within a day skips the slow map search.
+  // If the map server is down, a saved list up to 30 days old is used instead.
+  const CACHE_KEY = 'places-v2', CACHE_HOURS = 24, CACHE_NEAR_MI = 0.5, STALE_HOURS = 24 * 30, STALE_NEAR_MI = 3;
+  function writeCache(loc, places, radius) {
     const slim = places.map(p => ({
       id: p.id, name: p.name, lat: p.lat, lon: p.lon, cuisines: p.cuisines, phone: p.phone, website: p.website,
       menu: p.menu, brand: p.brand, compact: p.compact, chainName: p.chainName, address: p.address, hours: p.hours
     }));
-    store.set(CACHE_KEY, { lat: loc.lat, lon: loc.lon, time: Date.now(), places: slim });
+    try { localStorage.removeItem('places-v1'); } catch (e) { /* old format */ }
+    store.set(CACHE_KEY, { lat: loc.lat, lon: loc.lon, time: Date.now(), radius, places: slim });
   }
-  function readCache(loc) {
+  function readCache(loc, maxHours, nearMi) {
     const c = store.get(CACHE_KEY);
     if (!c || !Array.isArray(c.places) || typeof c.lat !== 'number' || typeof c.lon !== 'number') return null;
-    if (!(Date.now() - c.time < CACHE_HOURS * 3600 * 1000)) return null;
-    if (milesBetween(loc.lat, loc.lon, c.lat, c.lon) > CACHE_NEAR_MI) return null;
+    if (!(Date.now() - c.time < maxHours * 3600 * 1000)) return null;
+    const moved = milesBetween(loc.lat, loc.lon, c.lat, c.lon);
+    if (moved > nearMi) return null;
     try {
-      return c.places
+      const places = c.places
         .filter(p => p && typeof p.name === 'string' && typeof p.lat === 'number' && typeof p.lon === 'number')
         .map(p => {
           const q = { ...p, cuisines: Array.isArray(p.cuisines) ? p.cuisines : ['Other'], dist: milesBetween(loc.lat, loc.lon, p.lat, p.lon), hoursParsed: parseHours(p.hours || '') };
@@ -1300,7 +1363,13 @@
         })
         .filter(p => p.dist <= MAX_RADIUS_MI)
         .sort((a, b) => a.dist - b.dist);
+      const radius = DIST_OPTIONS.includes(Number(c.radius)) ? Number(c.radius) : NEAR_RADIUS_MI;
+      return places.length ? { places, radius, time: c.time } : null;
     } catch (e) { return null; }
+  }
+  function ago(time) {
+    const days = Math.floor((Date.now() - time) / 86400000);
+    return days <= 0 ? 'earlier today' : days === 1 ? 'yesterday' : `${days} days ago`;
   }
 
   /* ---------- Using the person's location ---------- */
@@ -1340,6 +1409,7 @@
   }
 
   async function startAt(loc) {
+    $('#retrySetupBtn').hidden = true;
     cancelLoad(); state.loadError = '';
     state.loc = loc; state.demo = false;
     state.all = []; state.fetchedRadius = 0; state.excluded.clear(); state.cuisines.clear();
@@ -1351,6 +1421,10 @@
 
   // Location: GPS
   $('#locateBtn').addEventListener('click', () => useMyLocation(false));
+  $('#retrySetupBtn').addEventListener('click', () => {
+    $('#retrySetupBtn').hidden = true;
+    if (lastFailedLoc) startAt(lastFailedLoc); else useMyLocation(false);
+  });
   // Escape hatch on the loading screen.
   $('#loaderOther').addEventListener('click', () => {
     geoRequest++;
@@ -1401,7 +1475,7 @@
   $('#openSwitch').addEventListener('click', () => { state.openNow = !state.openNow; refresh(); });
   $('#localSwitch').addEventListener('click', () => { state.localOnly = !state.localOnly; refresh(); });
   $('#reshuffleBtn').addEventListener('click', () => refresh({ keepRotation: true }));
-  $('#retryBtn').addEventListener('click', () => { if (state.failedNeed) state.radius = state.failedNeed; ensureData(); });
+  $('#retryBtn').addEventListener('click', () => { state.loadError = ''; ensureData(); });
   $('#spinBtn').addEventListener('click', spin);
 
   // Sheet
