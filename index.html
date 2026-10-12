@@ -115,7 +115,9 @@
 
   /* Wheel */
   .wheel-wrap { position: relative; width: 100%; max-width: 380px; margin: 14px auto 6px; aspect-ratio: 1; }
-  .wheel-wrap canvas { display: block; width: 100%; height: 100%; }
+  .wheel-wrap canvas { display: block; width: 100%; height: 100%; -webkit-tap-highlight-color: transparent; }
+  .wheel-wrap canvas.tappable { cursor: pointer; }
+  .wheel-hint { margin: 2px 0 0; text-align: center; font-size: 13px; color: var(--muted); }
   .pointer {
     position: absolute; left: 50%; top: -6px; transform: translateX(-50%); z-index: 2;
     width: 0; height: 0; border-left: 15px solid transparent; border-right: 15px solid transparent; border-top: 30px solid var(--accent);
@@ -305,6 +307,7 @@
     <canvas id="wheel" role="img" aria-label="Wheel of restaurants"></canvas>
     <button class="hub" id="spinBtn" disabled>Spin</button>
   </div>
+  <p class="wheel-hint" id="wheelHint" hidden>Already know what you want? Tap a slice to pick it.</p>
 
   <div class="hero-actions" id="sharedActions" hidden>
     <button class="btn" id="seePickBtn">See the pick</button>
@@ -936,6 +939,40 @@
     });
   }
 
+  /* ---------- Tap a slice to pick it ---------- */
+  // Skips the spin: the wheel turns briefly to the tapped place and shows it as the winner.
+  function canPick() {
+    return !state.spinning && !state.shared && !!state.loc && state.wheel.length >= 1
+      && state.wheel.every(p => typeof p.lat === 'number');
+  }
+  function setHint(show) {
+    const on = !!show && canPick();
+    $('#wheelHint').hidden = !on;
+    canvas.classList.toggle('tappable', on);
+  }
+  function pickSlice(e) {
+    if (!canPick()) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left - rect.width / 2;
+    const y = e.clientY - rect.top - rect.height / 2;
+    const r = Math.hypot(x, y) * (size / rect.width);
+    const c = size / 2, R = c - Math.max(12, size * 0.04), hubR = size * 0.125 + 4;
+    if (r < hubR || r > R) return;                   // the Spin button or the rim
+    const n = state.wheel.length, seg = TAU / n;
+    const i = Math.floor((((Math.atan2(y, x) - state.rot) % TAU) + TAU) % TAU / seg) % n;
+    closeSheet(true);
+    state.spinning = true;
+    setControlsDisabled(true);
+    const names = state.wheel.map(w => w.name);
+    animateTo(i, 0.5, 0, reduceMotion() ? 250 : 900, () => {
+      state.spinning = false;
+      setControlsDisabled(false);
+      state.lastSpin = { names, t: i, f: 0.5 };      // sharing replays it landing here
+      showResult(state.wheel[i]);
+      if (state.pendingRefresh) { state.pendingRefresh = false; refresh({ keepRotation: true }); }
+    });
+  }
+
   /* ---------- Result sheet ---------- */
   const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const directionsUrl = p => isIOS()
@@ -1209,6 +1246,7 @@
     $('#hideBtn').hidden = true;
     state.rot = 0; drawWheel();
     $('#spinBtn').disabled = false;
+    setHint(true);
   }
 
   /* ---------- UI wiring ---------- */
@@ -1224,6 +1262,7 @@
     $('#hero').hidden = play;
     $('#modeSeg').hidden = !play;
     $('#locBtn').hidden = !play;
+    if (!play) setHint(false);
     if (play) $('#locLabel').textContent = (state.demo ? 'Sample places' : (state.loc.label || 'Near you')).split(',')[0].slice(0, 22);
   }
   function setSetupMsg(text, isError, offerDemo) {
@@ -1291,6 +1330,7 @@
     $('#reshuffleBtn').hidden = pool.length <= MAX_ON_WHEEL || !!state.loadError;
     $('#retryBtn').hidden = !(state.loadError && !state.busy);
     $('#loadbar').hidden = !state.busy;
+    setHint(pool.length >= 2);
     $('#openSwitch').setAttribute('aria-checked', String(state.openNow));
     $('#localSwitch').setAttribute('aria-checked', String(state.localOnly));
     renderDistChips();
@@ -1572,6 +1612,7 @@
   $('#reshuffleBtn').addEventListener('click', () => refresh({ keepRotation: true }));
   $('#retryBtn').addEventListener('click', () => { state.loadError = ''; ensureData(); });
   $('#spinBtn').addEventListener('click', spin);
+  canvas.addEventListener('click', pickSlice);
 
   // Sheet
   $('#scrim').addEventListener('click', () => { closeSupport(); closeSheet(); });
