@@ -200,6 +200,29 @@
   .ad-inner { max-width: 480px; margin: 0 auto; height: var(--ad-h); display: flex; align-items: center; justify-content: center; position: relative; color: var(--muted); font-size: 13px; }
   .ad-inner .tag { position: absolute; top: 3px; left: 10px; font-size: 10px; opacity: .8; }
 
+  /* Loading screen */
+  .loader {
+    position: fixed; inset: 0; z-index: 45; background: var(--bg);
+    display: flex; align-items: center; justify-content: center; padding: 24px 24px calc(24px + env(safe-area-inset-bottom, 0px));
+  }
+  .loader-inner { max-width: 340px; text-align: center; }
+  .loader-wheel {
+    width: 120px; height: 120px; margin: 0 auto 26px; border-radius: 50%;
+    border: 6px solid var(--ink);
+    background: conic-gradient(#D63B22 0 60deg, #F2B33D 0 120deg, #2E9A6B 0 180deg, #3568A8 0 240deg, #8B4A9C 0 300deg, #EE8446 0 360deg);
+    animation: loaderSpin 1.4s cubic-bezier(.45, .05, .55, .95) infinite;
+    position: relative;
+  }
+  .loader-wheel::after { content: ""; position: absolute; inset: 34%; border-radius: 50%; background: var(--accent); border: 4px solid var(--surface); }
+  @keyframes loaderSpin { to { transform: rotate(360deg); } }
+  .loader h2 { font-family: var(--font-display); font-weight: 800; font-size: 26px; letter-spacing: -0.02em; margin: 0 0 8px; }
+  .loader p { margin: 0; color: var(--muted); font-size: 16px; }
+  .loader .loader-slow { margin-top: 12px; font-size: 14px; }
+  .loader .link-btn { margin-top: 18px; }
+  @media (prefers-reduced-motion: reduce) { .loader-wheel { animation-duration: 6s; } }
+  .credit { text-align: center; margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+  .credit a { color: inherit; }
+
   /* Sharing */
   .sheet-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .after-row.single { grid-template-columns: 1fr; }
@@ -320,6 +343,18 @@
     <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.2C.9 8.4 3 4.5 6.7 4.5c2.1 0 3.6 1.2 4.3 2.6h2c.7-1.4 2.2-2.6 4.3-2.6 3.7 0 5.8 3.9 4.3 7.3C19.5 16.4 12 21 12 21z"/></svg>
     Enjoying Forkspin? Leave a tip
   </button>
+  <p class="credit">Restaurant data © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors</p>
+</div>
+
+<!-- Loading screen: stays up until the restaurants within 10 miles have arrived -->
+<div class="loader" id="loader" role="status" aria-live="polite" hidden>
+  <div class="loader-inner">
+    <div class="loader-wheel" aria-hidden="true"></div>
+    <h2 id="loaderTitle">Finding your location</h2>
+    <p id="loaderText">Allow location access so we can find restaurants near you.</p>
+    <p class="loader-slow" id="loaderSlow" hidden>Still searching. The free map server is busy right now, so this can take up to half a minute.</p>
+    <button class="link-btn" id="loaderOther">Use a different location</button>
+  </div>
 </div>
 
 <!-- Support (optional tip) -->
@@ -1126,7 +1161,10 @@
     const info = $('#poolInfo');
     if (state.busy) info.textContent = state.all.length ? `Loading places up to ${state.loadNeed} mi…` : 'Finding restaurants…';
     else if (state.loadError) info.textContent = state.loadError;
-    else if (pool.length === 0) info.textContent = state.all.length ? 'Nothing matches. Try loosening a filter.' : 'No restaurants found here. Try a different location.';
+    else if (pool.length === 0) {
+      const anyNearby = state.all.some(p => p.dist <= MAX_RADIUS_MI);
+      info.textContent = anyNearby ? 'Nothing matches. Try loosening a filter.' : `No restaurants found within ${MAX_RADIUS_MI} miles. Try a different location.`;
+    }
     else if (pool.length === 1) info.textContent = 'Only one place matches. Loosen a filter to spin.';
     else info.textContent = pool.length <= MAX_ON_WHEEL ? `${pool.length} places on the wheel` : `${MAX_ON_WHEEL} of ${pool.length} places on the wheel`;
     $('#reshuffleBtn').hidden = pool.length <= MAX_ON_WHEEL || !!state.loadError;
@@ -1160,8 +1198,22 @@
 
     cancelLoad();
     const loc = state.loc;
+
+    // Opened again near the same spot recently? Use the saved list instantly.
+    const cached = readCache(loc);
+    if (cached) {
+      state.all = cached; markChains(state.all);
+      state.fetchedRadius = need; state.loadError = '';
+      hideLoader(); refresh();
+      return;
+    }
+
     const ctl = new AbortController();
     state.loadCtl = ctl; state.busy = true; state.loadNeed = need; state.loadError = '';
+    if (!state.all.length) {
+      showLoader('Finding restaurants', `Looking for places within ${MAX_RADIUS_MI} miles of ${loc.label && loc.label !== 'Near you' ? loc.label.split(',')[0] : 'you'}.`,
+        'Still searching. The free map server is busy right now, so this can take up to half a minute.');
+    }
     refresh();
     try {
       let list = await fetchPlaces(loc.lat, loc.lon, need, ctl.signal);
@@ -1183,10 +1235,13 @@
       state.all = [...merged.values()].sort((a, b) => a.dist - b.dist);
       markChains(state.all);
       state.fetchedRadius = need;
+      writeCache(loc, state.all);
+      hideLoader();
       refreshWhenIdle();
     } catch (e) {
       if (state.loadCtl !== ctl) return;
       state.loadCtl = null; state.busy = false;
+      hideLoader();
       if (state.all.length) {
         // Fall back to the places we already have instead of leaving the wheel stuck.
         state.failedNeed = need;
@@ -1207,6 +1262,83 @@
     $('#locateBtn').disabled = false; $('#locateBtn').textContent = 'Find restaurants near me';
     $('#placeBtn').disabled = false;
   }
+  /* ---------- Loading screen ---------- */
+  let slowTimer = 0;
+  function showLoader(title, text, slowText) {
+    $('#loaderTitle').textContent = title;
+    $('#loaderText').textContent = text;
+    $('#loaderSlow').textContent = slowText || '';
+    $('#loaderSlow').hidden = true;
+    $('#loader').hidden = false;
+    clearTimeout(slowTimer);
+    if (slowText) slowTimer = setTimeout(() => { $('#loaderSlow').hidden = false; }, 8000);
+  }
+  function hideLoader() { $('#loader').hidden = true; clearTimeout(slowTimer); }
+
+  /* ---------- Saved results (this device only) ---------- */
+  // Reopening the app near the same spot within 12 hours skips the slow map search.
+  const CACHE_KEY = 'places-v1', CACHE_HOURS = 12, CACHE_NEAR_MI = 0.5;
+  function writeCache(loc, places) {
+    const slim = places.map(p => ({
+      id: p.id, name: p.name, lat: p.lat, lon: p.lon, cuisines: p.cuisines, phone: p.phone, website: p.website,
+      menu: p.menu, brand: p.brand, compact: p.compact, chainName: p.chainName, address: p.address, hours: p.hours
+    }));
+    store.set(CACHE_KEY, { lat: loc.lat, lon: loc.lon, time: Date.now(), places: slim });
+  }
+  function readCache(loc) {
+    const c = store.get(CACHE_KEY);
+    if (!c || !Array.isArray(c.places) || typeof c.lat !== 'number' || typeof c.lon !== 'number') return null;
+    if (!(Date.now() - c.time < CACHE_HOURS * 3600 * 1000)) return null;
+    if (milesBetween(loc.lat, loc.lon, c.lat, c.lon) > CACHE_NEAR_MI) return null;
+    try {
+      return c.places
+        .filter(p => p && typeof p.name === 'string' && typeof p.lat === 'number' && typeof p.lon === 'number')
+        .map(p => {
+          const q = { ...p, cuisines: Array.isArray(p.cuisines) ? p.cuisines : ['Other'], dist: milesBetween(loc.lat, loc.lon, p.lat, p.lon), hoursParsed: parseHours(p.hours || '') };
+          q.keys = keysFor(q);
+          return q;
+        })
+        .filter(p => p.dist <= MAX_RADIUS_MI)
+        .sort((a, b) => a.dist - b.dist);
+    } catch (e) { return null; }
+  }
+
+  /* ---------- Using the person's location ---------- */
+  let geoRequest = 0;   // ignores an answer that arrives after the person picked another location
+  function useMyLocation(fallbackToSaved) {
+    const ticket = ++geoRequest;
+    setSetupMsg('');
+    showLoader('Finding your location', 'Allow location access so we can find restaurants near you.',
+      'Taking a while? You can enter a city or ZIP code instead.');
+    const failed = err => {
+      if (ticket !== geoRequest) return;
+      const saved = store.get('loc');
+      if (fallbackToSaved && saved && typeof saved.lat === 'number' && typeof saved.lon === 'number') {
+        startAt(saved);
+        toast(`Couldn't get your location, so we're using ${(saved.label || 'your last location').split(',')[0]}.`);
+        return;
+      }
+      hideLoader();
+      setView('setup');
+      setSetupMsg(err && err.code === 1
+        ? 'Location access is off. Allow it in your browser settings, or enter a city or ZIP code below.'
+        : "Couldn't get your location. Enter a city or ZIP code below.", true);
+    };
+    if (!navigator.geolocation) { failed(null); return; }
+    navigator.geolocation.getCurrentPosition(pos => {
+      if (ticket !== geoRequest) return;
+      const loc = { lat: pos.coords.latitude, lon: pos.coords.longitude, label: 'Near you' };
+      startAt(loc);
+      // Fill in the town name when it arrives; restaurants don't wait for it.
+      reverseLabel(loc.lat, loc.lon).then(label => {
+        if (state.loc !== loc) return;
+        loc.label = label;
+        $('#locLabel').textContent = label.split(',')[0].slice(0, 22);
+        store.set('loc', loc);
+      });
+    }, failed, { enableHighAccuracy: false, timeout: 12000, maximumAge: 600000 });
+  }
+
   async function startAt(loc) {
     cancelLoad(); state.loadError = '';
     state.loc = loc; state.demo = false;
@@ -1218,19 +1350,16 @@
   }
 
   // Location: GPS
-  $('#locateBtn').addEventListener('click', () => {
-    setSetupMsg('');
-    if (!navigator.geolocation) { setSetupMsg('Location is not available here. Enter a city or ZIP code instead.', true); return; }
-    $('#locateBtn').disabled = true; $('#locateBtn').textContent = 'Finding you…';
-    navigator.geolocation.getCurrentPosition(async pos => {
-      const { latitude: lat, longitude: lon } = pos.coords;
-      const label = await reverseLabel(lat, lon);
-      resetSetupButtons();
-      startAt({ lat, lon, label });
-    }, () => {
-      resetSetupButtons();
-      setSetupMsg('Location access is off. Allow it in your browser settings, or enter a city or ZIP code below.', true);
-    }, { enableHighAccuracy: false, timeout: 12000, maximumAge: 300000 });
+  $('#locateBtn').addEventListener('click', () => useMyLocation(false));
+  // Escape hatch on the loading screen.
+  $('#loaderOther').addEventListener('click', () => {
+    geoRequest++;
+    cancelLoad(); state.loadError = '';
+    hideLoader();
+    state.loc = null; state.all = []; state.wheel = SETUP_WHEEL; state.rot = 0; drawWheel();
+    $('#spinBtn').disabled = true;
+    setView('setup'); setSetupMsg(''); resetSetupButtons();
+    $('#placeInput').focus();
   });
   // Location: typed
   async function searchPlace() {
@@ -1339,11 +1468,10 @@
   if (prefs && DIST_OPTIONS.includes(prefs.radius)) state.radius = prefs.radius;
   renderDistChips();
   const sharedResult = readShared(location.hash);
-  const saved = store.get('loc');
   const sharedWheel = readWheel(location.hash);
   if (sharedResult) openShared(sharedResult);
   else if (sharedWheel) openGroupWheel(sharedWheel);
-  else if (saved && typeof saved.lat === 'number' && typeof saved.lon === 'number') startAt(saved);
+  else useMyLocation(true);   // start from where the person is right now
 })();
 </script>
 </body>
