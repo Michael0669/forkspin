@@ -5,6 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#EEF4F1">
 <title>Forkspin – Let the wheel pick where you eat</title>
+<meta name="description" content="Can't decide where to eat? Spin the wheel of restaurants near you and go wherever it lands. Free.">
+<!-- Link previews in group chats and social apps -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Forkspin">
+<meta property="og:title" content="The wheel has spoken 🎡">
+<meta property="og:description" content="Can't decide where to eat? Forkspin spins the restaurants near you and picks one. Free.">
+<meta property="og:url" content="https://michael0669.github.io/forkspin/">
+<meta property="og:image" content="https://michael0669.github.io/forkspin/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="A colorful Forkspin wheel of restaurant names">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎡</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -188,6 +200,23 @@
   .ad-inner { max-width: 480px; margin: 0 auto; height: var(--ad-h); display: flex; align-items: center; justify-content: center; position: relative; color: var(--muted); font-size: 13px; }
   .ad-inner .tag { position: absolute; top: 3px; left: 10px; font-size: 10px; opacity: .8; }
 
+  /* Sharing */
+  .sheet-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .after-row.single { grid-template-columns: 1fr; }
+  .share-btn {
+    display: inline-flex; align-items: center; gap: 6px; flex: none;
+    min-height: 40px; padding: 0 14px; border-radius: 999px; border: 0;
+    background: var(--chip); font-weight: 700; font-size: 14px;
+  }
+  .hero-actions { display: grid; gap: 10px; margin-top: 16px; }
+  .toast {
+    position: fixed; left: 50%; transform: translateX(-50%); z-index: 50;
+    bottom: calc(var(--ad-h) + 16px + env(safe-area-inset-bottom, 0px));
+    max-width: calc(100% - 32px); padding: 12px 18px; border-radius: 12px;
+    background: var(--ink); color: var(--bg); font-weight: 500; font-size: 15px; text-align: center;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .3);
+  }
+
   /* Optional support: one quiet link at the bottom of the page */
   .support-link { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 22px auto 4px; color: var(--muted); font-weight: 500; }
   .support-link svg { color: var(--accent); }
@@ -217,6 +246,12 @@
     <p>Spin the wheel. Eat wherever it lands.</p>
   </section>
 
+  <!-- Shown when someone opens a shared result link -->
+  <section class="hero" id="sharedIntro" hidden>
+    <h1>The wheel has spoken</h1>
+    <p>A friend spun Forkspin. Here's where it landed.</p>
+  </section>
+
   <div class="seg" id="modeSeg" role="group" aria-label="Wheel mode" hidden>
     <button id="modeAny" aria-pressed="true">Anything nearby</button>
     <button id="modeNarrow" aria-pressed="false">Narrow it down</button>
@@ -226,6 +261,11 @@
     <div class="pointer" aria-hidden="true"></div>
     <canvas id="wheel" role="img" aria-label="Wheel of restaurants"></canvas>
     <button class="hub" id="spinBtn" disabled>Spin</button>
+  </div>
+
+  <div class="hero-actions" id="sharedActions" hidden>
+    <button class="btn" id="seePickBtn">See the pick</button>
+    <a class="btn primary" id="ownWheelBtn" href="./">Spin your own wheel</a>
   </div>
 
   <!-- Setup: shown until a location is chosen -->
@@ -287,7 +327,13 @@
 <!-- Result -->
 <div class="scrim" id="scrim" hidden></div>
 <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="rName" tabindex="-1" hidden>
-  <p class="kicker">Tonight you're eating at</p>
+  <div class="sheet-top">
+    <p class="kicker" id="rKicker">Tonight you're eating at</p>
+    <button class="share-btn" id="shareBtn">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="M7 8l5-5 5 5"/><path d="M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg>
+      Share
+    </button>
+  </div>
   <h2 id="rName"></h2>
   <div class="meta" id="rMeta"></div>
   <div class="hours" id="rHours"></div>
@@ -299,6 +345,8 @@
   </div>
   <button class="link-btn hide-link" id="hideBtn">Closed or not here? Hide it for good</button>
 </div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
 <!-- Ad slot -->
 <aside class="ad" id="ad" aria-label="Advertisement">
@@ -707,19 +755,12 @@
   }
 
   /* ---------- Spinning ---------- */
-  function spin() {
-    if (state.spinning || state.wheel.length < 2 || !state.loc) return;
-    closeSheet(true);
-    state.spinning = true;
-    setControlsDisabled(true);
-    const n = state.wheel.length;
-    const seg = TAU / n;
-    const t = Math.floor(Math.random() * n);          // uniform winner
-    const f = 0.12 + Math.random() * 0.76;            // land somewhere inside the slice
+  // Turns the wheel so slice `t` stops under the pointer, `f` of the way across it.
+  function animateTo(t, f, turns, dur, done) {
+    const seg = TAU / state.wheel.length;
     const target = 1.5 * Math.PI - (t + f) * seg;     // pointer is at the top of the wheel
-    const delta = (((target - state.rot) % TAU) + TAU) % TAU + TAU * (5 + Math.floor(Math.random() * 3));
+    const delta = (((target - state.rot) % TAU) + TAU) % TAU + TAU * turns;
     const start = state.rot;
-    const dur = reduceMotion() ? 1000 : 5200 + Math.random() * 800;
     const t0 = performance.now();
     const frame = now => {
       const p = Math.min(1, (now - t0) / dur);
@@ -727,13 +768,29 @@
       drawWheel();
       if (p < 1) { requestAnimationFrame(frame); return; }
       state.rot = ((state.rot % TAU) + TAU) % TAU;
-      state.spinning = false;
-      setControlsDisabled(false);
       try { navigator.vibrate && navigator.vibrate(40); } catch (e) { /* ignore */ }
-      showResult(state.wheel[t]);
-      if (state.pendingRefresh) { state.pendingRefresh = false; refresh({ keepRotation: true }); }
+      done();
     };
     requestAnimationFrame(frame);
+  }
+  function spin() {
+    if (state.shared) { if (!state.spinning) location.href = location.pathname; return; } // start your own wheel
+    if (state.spinning || state.wheel.length < 2 || !state.loc) return;
+    closeSheet(true);
+    state.spinning = true;
+    setControlsDisabled(true);
+    const n = state.wheel.length;
+    const t = Math.floor(Math.random() * n);          // uniform winner
+    const f = 0.12 + Math.random() * 0.76;            // land somewhere inside the slice
+    const wheelNames = state.wheel.map(w => w.name);
+    const dur = reduceMotion() ? 1000 : 5200 + Math.random() * 800;
+    animateTo(t, f, 5 + Math.floor(Math.random() * 3), dur, () => {
+      state.spinning = false;
+      setControlsDisabled(false);
+      state.lastSpin = { names: wheelNames, t, f };   // so the result can be shared and replayed
+      showResult(state.wheel[t]);
+      if (state.pendingRefresh) { state.pendingRefresh = false; refresh({ keepRotation: true }); }
+    });
   }
 
   /* ---------- Result sheet ---------- */
@@ -762,9 +819,15 @@
 
     const meta = $('#rMeta'); meta.replaceChildren();
     const add = (el, txt) => { const s = document.createElement('span'); s.textContent = txt; el.appendChild(s); };
-    add(meta, p.cuisines.join(', '));
-    add(meta, `${p.dist.toFixed(1)} mi away`);
+    if (p.cuisines.length) add(meta, p.cuisines.join(', '));
+    if (typeof p.dist === 'number') add(meta, `${p.dist.toFixed(1)} mi away`);
     if (p.address) add(meta, p.address);
+    $('#rKicker').textContent = state.shared ? "Your friend's wheel picked" : "Tonight you're eating at";
+    // A shared result has no wheel of your own yet: offer to start one instead.
+    $('#againBtn').textContent = state.shared ? 'Spin your own wheel' : 'Spin again';
+    $('#removeBtn').hidden = !!state.shared;
+    $('#hideBtn').hidden = !!state.shared;
+    $('.after-row').classList.toggle('single', !!state.shared);
 
     const hrs = $('#rHours'); hrs.replaceChildren();
     const st = openState(p);
@@ -787,7 +850,7 @@
     const menu = safeUrl(p.menu), site = safeUrl(p.website);
     if (menu) row.appendChild(actionLink('View menu', menu));
     else if (site) row.appendChild(actionLink('Website', site));
-    else row.appendChild(actionLink('Find menu', 'https://www.google.com/search?q=' + encodeURIComponent(`${p.name} ${state.loc && !state.demo ? state.loc.label : ''} menu`)));
+    else row.appendChild(actionLink('Find menu', 'https://www.google.com/search?q=' + encodeURIComponent(`${p.name} ${state.shared ? (p.address || '') : (state.loc ? state.loc.label : '')} menu`)));
     if (row.children.length === 1) row.classList.add('single');
     acts.appendChild(row);
     if (p.phone && tel) { /* phone number is visible via the Call button */ }
@@ -818,6 +881,106 @@
     $('#supportSheet').hidden = true;
     $('#scrim').hidden = true;
     if (!silent) $('#supportBtn').focus();
+  }
+
+  /* ---------- Sharing a result ---------- */
+  // The whole result lives in the link itself (after #), so no server is needed.
+  const clip = (s, n) => String(s || '').slice(0, n);
+  function toB64Url(obj) {
+    const bytes = new TextEncoder().encode(JSON.stringify(obj));
+    let bin = ''; bytes.forEach(b => { bin += String.fromCharCode(b); });
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function fromB64Url(s) {
+    const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+    return JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0))));
+  }
+  function shareLink(p) {
+    const spinInfo = state.shared ? state.shared.spin : state.lastSpin;
+    const data = {
+      v: 1,
+      n: clip(p.name, 80), la: +p.lat.toFixed(5), lo: +p.lon.toFixed(5),
+      c: p.cuisines.slice(0, 3).map(c => clip(c, 24)), a: clip(p.address, 90), ph: clip(p.phone, 30),
+      me: clip(p.menu, 200), we: clip(p.website, 200), h: clip(p.hours, 200)
+    };
+    if (spinInfo) data.s = { w: spinInfo.names.slice(0, MAX_ON_WHEEL).map(n => clip(n, 40)), t: spinInfo.t, f: +spinInfo.f.toFixed(3) };
+    return location.origin + location.pathname + '#r=' + toB64Url(data);
+  }
+  // Read a shared link. Everything in it is treated as untrusted text.
+  function readShared(hash) {
+    if (!hash.startsWith('#r=')) return null;
+    try {
+      const d = fromB64Url(hash.slice(3));
+      const str = (x, n) => (typeof x === 'string' ? x.slice(0, n) : '');
+      const lat = Number(d.la), lon = Number(d.lo);
+      if (!str(d.n, 80) || !isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+      const hours = str(d.h, 200);
+      const place = {
+        id: 'shared', name: str(d.n, 80), lat, lon, dist: null,
+        cuisines: Array.isArray(d.c) ? d.c.map(c => str(c, 24)).filter(Boolean).slice(0, 3) : [],
+        address: str(d.a, 90), phone: str(d.ph, 30), menu: str(d.me, 200), website: str(d.we, 200),
+        hours, hoursParsed: parseHours(hours), keys: []
+      };
+      let spinInfo = null;
+      const s = d.s;
+      if (s && Array.isArray(s.w)) {
+        const names = s.w.map(n => str(n, 40)).filter(Boolean).slice(0, MAX_ON_WHEEL);
+        const t = Number(s.t), f = Number(s.f);
+        if (names.length >= 2 && Number.isInteger(t) && t >= 0 && t < names.length && f > 0 && f < 1) spinInfo = { names, t, f };
+      }
+      return { place, spin: spinInfo };
+    } catch (e) { return null; }
+  }
+  let toastTimer = 0;
+  function toast(msg) {
+    const el = $('#toast');
+    el.textContent = msg; el.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.hidden = true; }, 3200);
+  }
+  async function shareResult() {
+    const p = state.current;
+    if (!p) return;
+    const url = shareLink(p);
+    const text = state.shared
+      ? `The wheel picked ${p.name}! 🎡`
+      : `The wheel has spoken: we're eating at ${p.name}! 🎡`;
+    if (navigator.share) {
+      try { await navigator.share({ title: 'Forkspin', text, url }); return; }
+      catch (e) { if (e && e.name === 'AbortError') return; /* fall through to copying */ }
+    }
+    try {
+      await navigator.clipboard.writeText(`${text} ${url}`);
+      toast('Link copied. Paste it in your group chat.');
+    } catch (e) {
+      window.prompt('Copy this link to share:', url);
+    }
+  }
+  // Someone opened a shared link: show the same wheel, replay the spin, then the pick.
+  function openShared(shared) {
+    state.shared = shared;
+    $('#hero').hidden = true;
+    $('#sharedIntro').hidden = false;
+    $('#setup').hidden = true;
+    $('#play').hidden = true;
+    $('#modeSeg').hidden = true;
+    $('#locBtn').hidden = true;
+    $('#spinBtn').disabled = true;
+    const show = () => {
+      state.spinning = false;
+      $('#spinBtn').disabled = false;            // tapping Spin now starts their own wheel
+      $('#sharedActions').hidden = false;
+      showResult(shared.place);
+    };
+    if (shared.spin) {
+      state.wheel = shared.spin.names.map(name => ({ name }));
+      state.rot = 0; drawWheel();
+      state.spinning = true;
+      setTimeout(() => animateTo(shared.spin.t, shared.spin.f, 6, reduceMotion() ? 1000 : 5200, show), 500);
+    } else {
+      state.wheel = [{ name: shared.place.name }, { name: shared.place.name }];
+      drawWheel(); show();
+    }
   }
 
   /* ---------- UI wiring ---------- */
@@ -1048,7 +1211,15 @@
     $('#supportLater').addEventListener('click', () => closeSupport());
     $('#supportGo').addEventListener('click', () => closeSupport(true));
   }
-  $('#againBtn').addEventListener('click', () => { closeSheet(true); setTimeout(spin, 150); });
+  $('#againBtn').addEventListener('click', () => {
+    if (state.shared) { location.href = location.pathname; return; } // start fresh on your own wheel
+    closeSheet(true); setTimeout(spin, 150);
+  });
+  $('#shareBtn').addEventListener('click', shareResult);
+  $('#seePickBtn').addEventListener('click', () => { if (state.shared) showResult(state.shared.place); });
+  $('#ownWheelBtn').addEventListener('click', e => { e.preventDefault(); location.href = location.pathname; });
+  // Opening another shared link while the app is already open.
+  window.addEventListener('hashchange', () => { if (location.hash.startsWith('#r=')) location.reload(); });
   $('#removeBtn').addEventListener('click', () => {
     // Removes the whole restaurant or chain, so another location doesn't take its place.
     if (state.current) state.current.keys.forEach(k => state.excluded.add(k));
@@ -1083,8 +1254,10 @@
   const prefs = store.get('prefs');
   if (prefs && DIST_OPTIONS.includes(prefs.radius)) state.radius = prefs.radius;
   renderDistChips();
+  const sharedResult = readShared(location.hash);
   const saved = store.get('loc');
-  if (saved && typeof saved.lat === 'number' && typeof saved.lon === 'number') startAt(saved);
+  if (sharedResult) openShared(sharedResult);
+  else if (saved && typeof saved.lat === 'number' && typeof saved.lon === 'number') startAt(saved);
 })();
 </script>
 </body>
